@@ -209,4 +209,4 @@ plt.title("V - Valor")
 plt.axis("off")
 
 plt.tight_layout()
-plt.show()
+plt.show()gis
