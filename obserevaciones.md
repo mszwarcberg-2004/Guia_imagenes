@@ -181,6 +181,28 @@ También se observan algunas oscilaciones alrededor de bordes de alto contraste 
 
 En esta comparación, **el filtro gaussiano espacial conserva mejor los detalles de la imagen que el pasa-bajos frecuencial implementado**, aunque este resultado depende de los parámetros seleccionados para cada filtro.
 
+#### Evaluación cuantitativa mediante PSNR y SSIM
+
+Se calcularon las métricas PSNR y SSIM para comparar la ROI original con las imágenes obtenidas mediante los filtros espaciales de media, mediana y gaussiano.
+
+Se obtuvieron los siguientes resultados:
+
+| Filtro | PSNR (dB) | SSIM |
+|---|---:|---:|
+| Media | 39,57 | 0,9769 |
+| Mediana | 42,42 | 0,9834 |
+| Gaussiano | 41,75 | 0,9858 |
+
+**Observaciones:**
+
+El filtro de mediana presentó el valor más alto de PSNR, lo que indica una menor diferencia de intensidad respecto de la ROI original. Por otro lado, el filtro gaussiano obtuvo el mayor SSIM, mostrando una mayor similitud estructural con la imagen original.
+
+Los tres filtros presentaron valores elevados de ambas métricas, indicando que las imágenes procesadas mantienen una alta similitud con la ROI original.
+
+Sin embargo, estas métricas no permiten determinar por sí solas qué filtro elimina mejor el ruido o los reflejos luminosos, ya que únicamente evalúan la similitud respecto de la imagen de referencia.
+
+En esta comparación, **el filtro gaussiano presentó la mayor similitud estructural**, aunque no eliminó el reflejo luminoso presente sobre el borde de la pupila.
+
 #### Conclusiones generales del apartado 1.3
 
 A partir de las comparaciones realizadas, se observó que **Canny permite identificar de manera más clara y continua el contorno pupilar**, tanto en la ROI original como en la filtrada.
@@ -190,6 +212,8 @@ El filtro gaussiano permite suavizar pequeñas variaciones de intensidad, pero n
 Por otra parte, el análisis de Fourier y de la PSD permitió comprobar que el filtrado modifica la distribución de las componentes frecuenciales y que la fase contiene información fundamental sobre la estructura espacial de la imagen.
 
 En conjunto, los resultados muestran que **no siempre es conveniente aplicar un filtrado previo**, ya que la reducción de ruido o detalles también puede afectar los bordes que se desean conservar.
+
+Finalmente, la evaluación mediante PSNR y SSIM mostró que los tres filtros espaciales conservan una alta similitud con la ROI original. El filtro de mediana obtuvo el mayor PSNR, mientras que el gaussiano presentó el mayor SSIM. Sin embargo, estas métricas no permiten determinar por sí solas qué filtro resulta más adecuado para detectar el contorno pupilar, por lo que deben complementarse con el análisis visual de los bordes.
 
 ## Módulo 2. Segmentación y morfología matemática
 
