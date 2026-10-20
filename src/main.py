@@ -67,3 +67,146 @@ plt.imshow(roi_rgb)
 plt.title("Region de interes (ROI)")
 plt.axis("off")
 plt.show()
+
+
+# 1.1.2 Dimensiones y profundidad de bits
+
+alto, ancho, canales = roi.shape
+
+# Cantidad de bits por canal
+bits = roi.dtype.itemsize * 8
+
+print("Dimensiones de la ROI:")
+print(f"Ancho: {ancho} pixeles")
+print(f"Alto: {alto} pixeles")
+print(f"Cantidad de canales: {canales}")
+print(f"Profundidad de bits por canal: {bits}")
+print(f"Profundidad total por pixel: {bits * canales} bits")
+
+
+
+# 1.1.3 Resolucion espacial: submuestreo
+
+escalas = [0.50, 0.25, 0.05]
+
+plt.figure(figsize=(12, 8))
+
+plt.subplot(2, 2, 1)
+plt.imshow(roi_rgb)
+plt.title("ROI original (100%)")
+plt.axis("off")
+
+for i, escala in enumerate(escalas):
+    nuevo_ancho = max(1, round(ancho * escala))
+    nuevo_alto = max(1, round(alto * escala))
+
+    roi_reducida = cv2.resize(
+        roi_rgb,
+        (nuevo_ancho, nuevo_alto),
+        interpolation=cv2.INTER_AREA
+    )
+
+    plt.subplot(2, 2, i + 2)
+    plt.imshow(roi_reducida, interpolation="nearest")
+    plt.title(f"Resolucion {int(escala * 100)}% ({nuevo_ancho}x{nuevo_alto})")
+    plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.1.4 Cuantizacion (profundidad de bits)
+
+# Funcion para reducir la cantidad de niveles de intensidad
+def cuantizar(imagen, bits):
+    niveles = 2 ** bits
+    paso = 256 // niveles
+
+    imagen_cuantizada = (imagen // paso) * paso
+
+    return imagen_cuantizada.astype("uint8")
+
+
+# Cuantizacion de la ROI a 4 y 2 bits por canal
+roi_4bits = cuantizar(roi_rgb, 4)
+roi_2bits = cuantizar(roi_rgb, 2)
+
+# Visualizacion comparativa
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.imshow(roi_rgb)
+plt.title("Original - 8 bits")
+plt.axis("off")
+
+plt.subplot(1, 3, 2)
+plt.imshow(roi_4bits)
+plt.title("Cuantizacion - 4 bits")
+plt.axis("off")
+
+plt.subplot(1, 3, 3)
+plt.imshow(roi_2bits)
+plt.title("Cuantizacion - 2 bits")
+plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.1.5 Espacios de color
+
+# A. Separacion de los canales RGB
+
+# Separar la ROI en sus tres canales de color
+R, G, B = cv2.split(roi_rgb)
+
+# Visualizar cada canal en escala de grises
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.imshow(R, cmap="gray", vmin=0, vmax=255)
+plt.title("Canal R (Rojo)")
+plt.axis("off")
+
+plt.subplot(1, 3, 2)
+plt.imshow(G, cmap="gray", vmin=0, vmax=255)
+plt.title("Canal G (Verde)")
+plt.axis("off")
+
+plt.subplot(1, 3, 3)
+plt.imshow(B, cmap="gray", vmin=0, vmax=255)
+plt.title("Canal B (Azul)")
+plt.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# B. Conversion del espacio RGB a HSV
+
+# Convertir la ROI de RGB a HSV
+roi_hsv = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2HSV)
+
+# Separar las componentes HSV
+H, S, V = cv2.split(roi_hsv)
+
+# Visualizar cada componente en escala de grises
+plt.figure(figsize=(12, 4))
+
+plt.subplot(1, 3, 1)
+plt.imshow(H, cmap="gray", vmin=0, vmax=179)
+plt.title("H - Matiz")
+plt.axis("off")
+
+plt.subplot(1, 3, 2)
+plt.imshow(S, cmap="gray", vmin=0, vmax=255)
+plt.title("S - Saturacion")
+plt.axis("off")
+
+plt.subplot(1, 3, 3)
+plt.imshow(V, cmap="gray", vmin=0, vmax=255)
+plt.title("V - Valor")
+plt.axis("off")
+
+plt.tight_layout()
+plt.show()
