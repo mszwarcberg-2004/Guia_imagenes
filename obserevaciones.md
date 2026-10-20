@@ -37,8 +37,7 @@ Se aplicaron dos métodos de ecualización sobre la ROI en escala de grises:
 
 En esta ROI, **CLAHE presenta el resultado visual más equilibrado**, ya que mejora el contraste local sin generar cambios tan bruscos de intensidad. Sin embargo, la imagen sigue presentando reflejos luminosos y cierta falta de definición.
 
-Los reflejos luminosos sobre la pupila ya estaban presentes en la imagen original, por lo que no fueron introducidos por estos métodos.
-
+Con respecto al ruido, no se observa un ruido muy marcado, aunque la imagen tiene poca resolución y algunos reflejos luminosos. Eso no significa que no tenga ruido, sino que no podemos distinguirlo claramente a simple vista.
 #### 1.2.4 Ruido y filtrado espacial
 
 **Observaciones:** Pendiente.

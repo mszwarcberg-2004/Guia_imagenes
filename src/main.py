@@ -23,8 +23,13 @@ if not video.isOpened():
 # Obtener la cantidad de frames
 total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
 
-# Seleccionar el frame de la mitad del video
-frame_num = total_frames // 2
+
+# Seleccionar un frame en un instante determinado
+segundo = 6
+
+fps = video.get(cv2.CAP_PROP_FPS)
+frame_num = int(segundo * fps)
+
 video.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
 
 # Extraer el frame
@@ -370,3 +375,5 @@ for i in range(4):
 
 plt.tight_layout()
 plt.show()
+
+#
