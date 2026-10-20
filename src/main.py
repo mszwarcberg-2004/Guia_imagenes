@@ -881,3 +881,36 @@ for a in ax:
 
 plt.tight_layout()
 plt.show()
+
+# Preguntas finales del 1.3 - PSNR y SSIM
+
+from skimage.metrics import structural_similarity as ssim
+
+# Imagen de referencia: ROI original
+imagen_referencia = roi_gris
+
+# Imagenes obtenidas con los filtros espaciales del 1.2.4
+imagenes_filtradas = {
+    "Media": roi_media,
+    "Mediana": roi_mediana,
+    "Gaussiano": roi_filtro_gaussiano
+}
+
+# Calcular PSNR y SSIM para cada filtro
+print("\n--- Comparacion PSNR y SSIM ---")
+
+for nombre, imagen in imagenes_filtradas.items():
+
+    # PSNR: compara las diferencias de intensidad
+    psnr_valor = cv2.PSNR(imagen_referencia, imagen)
+
+    # SSIM: compara la similitud estructural
+    ssim_valor = ssim(
+        imagen_referencia,
+        imagen,
+        data_range=255
+    )
+
+    print(f"\nFiltro: {nombre}")
+    print(f"PSNR: {psnr_valor:.2f} dB")
+    print(f"SSIM: {ssim_valor:.4f}")
