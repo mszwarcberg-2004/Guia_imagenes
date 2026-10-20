@@ -379,7 +379,6 @@ plt.show()
 
 # 1.2.4 Analisis de ruido y filtrado espacial
 
-
 # A. Aplicacion de filtros sobre la ROI original (sin ruido simulado)
 
 # Filtro de media
@@ -504,5 +503,381 @@ plt.tight_layout()
 plt.show()
 
 
+# 1.3 Deteccion de bordes y dominio frecuencial
+
+# 1.3.1 Deteccion de bordes
+
+# Imagen original y filtrada en el punto 1.2.4
+imagen_original = roi_gris
+imagen_filtrada = roi_filtro_gaussiano
+
+# Funcion para aplicar los cinco operadores
+def detectar_bordes(imagen):
+
+    imagen_float = imagen.astype(np.float32)
+
+    # Roberts
+    kernel_roberts_x = np.array([[1, 0],
+                                 [0, -1]], dtype=np.float32)
+
+    kernel_roberts_y = np.array([[0, 1],
+                                 [-1, 0]], dtype=np.float32)
+
+    roberts_x = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_roberts_x
+    )
+    roberts_y = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_roberts_y
+    )
+
+    roberts = cv2.magnitude(roberts_x, roberts_y)
+
+    # Sobel
+    sobel_x = cv2.Sobel(imagen, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(imagen, cv2.CV_32F, 0, 1, ksize=3)
+
+    sobel = cv2.magnitude(sobel_x, sobel_y)
+
+    # Prewitt
+    kernel_prewitt_x = np.array([[-1, 0, 1],
+                                 [-1, 0, 1],
+                                 [-1, 0, 1]], dtype=np.float32)
+
+    kernel_prewitt_y = np.array([[-1, -1, -1],
+                                 [0, 0, 0],
+                                 [1, 1, 1]], dtype=np.float32)
+
+    prewitt_x = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_prewitt_x
+    )
+    prewitt_y = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_prewitt_y
+    )
+
+    prewitt = cv2.magnitude(prewitt_x, prewitt_y)
+
+    # Laplaciano
+    laplaciano = cv2.Laplacian(
+        imagen, cv2.CV_32F, ksize=3
+    )
+    laplaciano = np.abs(laplaciano)
+
+    # Canny
+    canny = cv2.Canny(imagen, 50, 150)
+
+    return [roberts, sobel, prewitt, laplaciano, canny]
 
 
+# Aplicar los operadores a ambas imagenes
+bordes_original = detectar_bordes(imagen_original)
+bordes_filtrada = detectar_bordes(imagen_filtrada)
+
+nombres = ["Roberts", "Sobel", "Prewitt",
+           "Laplaciano", "Canny"]
+
+# Comparacion visual
+fig, ax = plt.subplots(2, 6, figsize=(18, 7))
+
+ax[0, 0].imshow(imagen_original, cmap="gray")
+ax[0, 0].set_title("ROI original")
+
+ax[1, 0].imshow(imagen_filtrada, cmap="gray")
+ax[1, 0].set_title("ROI filtrada - Gaussiano")
+
+for i in range(5):
+
+    # Usamos la misma escala por operador
+    # para comparar original y filtrada
+    limite = max(
+        np.max(bordes_original[i]),
+        np.max(bordes_filtrada[i]),
+        1
+    )
+
+    ax[0, i+1].imshow(
+        bordes_original[i], cmap="gray",
+        vmin=0, vmax=limite
+    )
+    ax[0, i+1].set_title(nombres[i] + " - Original")
+
+    ax[1, i+1].imshow(
+        bordes_filtrada[i], cmap="gray",
+        vmin=0, vmax=limite
+    )
+    ax[1, i+1].set_title(nombres[i] + " - Filtrada")
+
+for fila in ax:
+    for a in fila:
+        a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.2 Transformada de Fourier 2D
+
+# Calcular la transformada de Fourier de la ROI original
+F_original = np.fft.fft2(roi_gris)
+
+# Centrar las frecuencias bajas
+F_original_centrada = np.fft.fftshift(F_original)
+
+# Obtener magnitud y fase
+magnitud_original = np.abs(F_original_centrada)
+fase_original = np.angle(F_original_centrada)
+
+# Representar la magnitud en escala logaritmica
+magnitud_log = np.log1p(magnitud_original)
+
+# Visualizar la imagen, magnitud y fase
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+ax[0].imshow(roi_gris, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(magnitud_log, cmap="gray")
+ax[1].set_title("Magnitud (log)")
+
+ax[2].imshow(fase_original, cmap="gray",
+             vmin=-np.pi, vmax=np.pi)
+ax[2].set_title("Fase")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# A. Reconstruccion utilizando solo magnitud
+
+# Conservar magnitud y establecer fase igual a cero
+F_solo_magnitud = magnitud_original
+
+recon_magnitud = np.fft.ifft2(
+    np.fft.ifftshift(F_solo_magnitud)
+).real
+
+
+# B. Reconstruccion utilizando solo fase
+
+# Conservar fase y establecer magnitud igual a uno
+F_solo_fase = np.exp(1j * fase_original)
+
+recon_fase = np.fft.ifft2(
+    np.fft.ifftshift(F_solo_fase)
+).real
+
+
+# C. Cruzar magnitud y fase de dos imagenes
+
+# Fourier de la ROI filtrada con gaussiano
+F_gaussiana = np.fft.fftshift(
+    np.fft.fft2(roi_filtro_gaussiano)
+)
+
+magnitud_gaussiana = np.abs(F_gaussiana)
+fase_gaussiana = np.angle(F_gaussiana)
+
+# Magnitud original + fase gaussiana
+F_cruzada_1 = magnitud_original * np.exp(
+    1j * fase_gaussiana
+)
+
+recon_cruzada_1 = np.fft.ifft2(
+    np.fft.ifftshift(F_cruzada_1)
+).real
+
+# Magnitud gaussiana + fase original
+F_cruzada_2 = magnitud_gaussiana * np.exp(
+    1j * fase_original
+)
+
+recon_cruzada_2 = np.fft.ifft2(
+    np.fft.ifftshift(F_cruzada_2)
+).real
+
+
+# D. Visualizacion comparativa
+
+# Normalizar cada reconstruccion para visualizarla
+def normalizar_imagen(imagen):
+    return cv2.normalize(
+        imagen.astype(np.float32),
+        None, 0, 255, cv2.NORM_MINMAX
+    )
+
+imagenes = [
+    roi_gris,
+    recon_magnitud,
+    recon_fase,
+    recon_cruzada_1,
+    recon_cruzada_2
+]
+
+titulos = [
+    "ROI original",
+    "Solo magnitud",
+    "Solo fase",
+    "Magnitud original + fase gaussiana",
+    "Magnitud gaussiana + fase original"
+]
+
+fig, ax = plt.subplots(1, 5, figsize=(18, 4))
+
+for i in range(5):
+    ax[i].imshow(
+        normalizar_imagen(imagenes[i]),
+        cmap="gray"
+    )
+    ax[i].set_title(titulos[i], fontsize=9)
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.3 Densidad espectral de potencia (PSD)
+
+# Calcular la transformada de Fourier de la ROI original y filtrada
+F_original_psd = np.fft.fftshift(
+    np.fft.fft2(roi_gris.astype(float))
+)
+
+F_gaussiana_psd = np.fft.fftshift(
+    np.fft.fft2(roi_filtro_gaussiano.astype(float))
+)
+
+# Calcular la PSD como el cuadrado de la magnitud
+psd_original = np.abs(F_original_psd)**2
+psd_gaussiana = np.abs(F_gaussiana_psd)**2
+
+# Aplicar escala logaritmica para visualizar mejor
+psd_original_log = np.log1p(psd_original)
+psd_gaussiana_log = np.log1p(psd_gaussiana)
+
+# Usar la misma escala para comparar las dos imagenes
+escala_maxima = max(
+    np.max(psd_original_log),
+    np.max(psd_gaussiana_log)
+)
+
+# Visualizar las PSD
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(
+    psd_original_log,
+    cmap="gray",
+    vmin=0,
+    vmax=escala_maxima
+)
+ax[0].set_title("PSD - ROI original")
+
+ax[1].imshow(
+    psd_gaussiana_log,
+    cmap="gray",
+    vmin=0,
+    vmax=escala_maxima
+)
+ax[1].set_title("PSD - ROI filtrada (Gaussiano)")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.4 Filtrado en el dominio frecuencial
+
+# Calcular la transformada de Fourier del frame completo
+F_frame = np.fft.fft2(frame_gris.astype(float))
+
+# Centrar las frecuencias bajas
+F_frame_centrada = np.fft.fftshift(F_frame)
+
+# Obtener las dimensiones del frame
+alto_frame, ancho_frame = frame_gris.shape
+
+# Crear coordenadas para calcular la distancia al centro
+Y, X = np.ogrid[:alto_frame, :ancho_frame]
+
+centro_y = alto_frame // 2
+centro_x = ancho_frame // 2
+
+distancia = np.sqrt(
+    (X - centro_x)**2 + (Y - centro_y)**2
+)
+
+# Definir una frecuencia de corte inicial
+D0 = 0.10 * min(alto_frame, ancho_frame)
+
+# Crear las mascaras de filtrado
+# Pasa-bajos: conserva frecuencias cercanas al centro
+H_pasabajos = (distancia <= D0).astype(float)
+
+# Pasa-altos: conserva frecuencias alejadas del centro
+H_pasaaltos = (distancia > D0).astype(float)
+
+# Aplicar las mascaras en el dominio frecuencial
+F_pasabajos = F_frame_centrada * H_pasabajos
+F_pasaaltos = F_frame_centrada * H_pasaaltos
+
+# Reconstruir las imagenes mediante transformada inversa
+frame_pasabajos = np.fft.ifft2(
+    np.fft.ifftshift(F_pasabajos)
+).real
+
+frame_pasaaltos = np.fft.ifft2(
+    np.fft.ifftshift(F_pasaaltos)
+).real
+
+# Aplicar filtro gaussiano en el dominio espacial
+# para comparar ambos tipos de filtrado
+frame_gaussiano = cv2.GaussianBlur(
+    frame_gris, (5, 5), 0
+)
+
+# Visualizar las imagenes
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+ax[0].imshow(frame_gris, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("Frame original")
+
+ax[1].imshow(frame_pasabajos, cmap="gray",
+             vmin=0, vmax=255)
+ax[1].set_title("Pasa-bajos frecuencial")
+
+# El pasa-altos puede contener valores negativos.
+# Centramos la visualizacion en cero para observar bordes.
+limite = max(np.max(np.abs(frame_pasaaltos)), 1)
+
+ax[2].imshow(frame_pasaaltos, cmap="gray",
+             vmin=-limite, vmax=limite)
+ax[2].set_title("Pasa-altos frecuencial")
+
+ax[3].imshow(frame_gaussiano, cmap="gray",
+             vmin=0, vmax=255)
+ax[3].set_title("Gaussiano espacial")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Visualizar las mascaras frecuenciales
+fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+
+ax[0].imshow(H_pasabajos, cmap="gray")
+ax[0].set_title("Mascara pasa-bajos")
+
+ax[1].imshow(H_pasaaltos, cmap="gray")
+ax[1].set_title("Mascara pasa-altos")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
