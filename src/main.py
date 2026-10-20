@@ -492,7 +492,7 @@ titulos = [
     "Filtro de media"
 ]
 
-fig, ax = plt.subplots(3, 2, figsize=(10, 12))
+fig, ax = plt.subplots(3, 2, figsize=(8, 6))
 
 for i in range(3):
     for j in range(2):
@@ -502,3 +502,7 @@ for i in range(3):
 
 plt.tight_layout()
 plt.show()
+
+
+
+
