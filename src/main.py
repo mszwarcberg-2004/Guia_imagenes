@@ -376,4 +376,129 @@ for i in range(4):
 plt.tight_layout()
 plt.show()
 
-#
+
+# 1.2.4 Analisis de ruido y filtrado espacial
+
+
+# A. Aplicacion de filtros sobre la ROI original (sin ruido simulado)
+
+# Filtro de media
+roi_media = cv2.blur(roi_gris, (3, 3))
+
+# Filtro de mediana
+roi_mediana = cv2.medianBlur(roi_gris, 3)
+
+# Filtro gaussiano
+roi_filtro_gaussiano = cv2.GaussianBlur(roi_gris, (3, 3), 0)
+
+# Comparar la imagen original con las tres filtradas
+imagenes = [roi_gris, roi_media, roi_mediana, roi_filtro_gaussiano]
+titulos = ["ROI original", "Filtro de media", "Filtro de mediana", "Filtro gaussiano"]
+
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+for i in range(4):
+    ax[i].imshow(imagenes[i], cmap="gray", vmin=0, vmax=255)
+    ax[i].set_title(titulos[i])
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# B. Simulacion de los distintos tipos de ruido
+
+# Creamos un generador de numeros aleatorios
+rng = np.random.default_rng(42)
+
+# Matriz de gaussiano
+ruido_gaussiano = rng.normal(0, 20, roi_gris.shape)
+
+#Sumamos el ruido gaussiano a las intensidades originales
+roi_gaussiana = np.clip(
+    roi_gris.astype(float) + ruido_gaussiano, 0, 255
+).astype("uint8")
+
+# Ruido sal y pimienta
+roi_sal_pimienta = roi_gris.copy()
+
+#Seleccionamos aleatoriamente qué pixeles vamos a modificar para el ruido sal y pimienta
+probabilidad = 0.05 #queremos modificar el 5% de los pixeles de la imagen
+aleatorios = rng.random(roi_gris.shape) #generamos numeros aleatorios
+
+roi_sal_pimienta[aleatorios < probabilidad / 2] = 0
+roi_sal_pimienta[(aleatorios >= probabilidad / 2) &
+                 (aleatorios < probabilidad)] = 255
+
+# Ruido speckle
+ruido_speckle = rng.normal(0, 0.2, roi_gris.shape)
+roi_speckle = np.clip(
+    roi_gris.astype(float) * (1 + ruido_speckle), 0, 255
+).astype("uint8")
+
+# Comparacion de los ruidos
+imagenes_ruido = [
+    roi_gris,
+    roi_gaussiana,
+    roi_sal_pimienta,
+    roi_speckle
+]
+
+titulos_ruido = [
+    "ROI original",
+    "Ruido gaussiano",
+    "Sal y pimienta",
+    "Ruido speckle"
+]
+
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+for i in range(4):
+    ax[i].imshow(imagenes_ruido[i], cmap="gray", vmin=0, vmax=255)
+    ax[i].set_title(titulos_ruido[i])
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# C. Aplicacion de filtros espaciales
+
+# Aplicar filtro gaussiano al ruido gaussiano
+roi_gaussiana_filtrada = cv2.GaussianBlur(roi_gaussiana, (3, 3), 0)
+
+# Aplicar filtro de mediana al ruido sal y pimienta
+roi_sal_pimienta_filtrada = cv2.medianBlur(roi_sal_pimienta, 3)
+
+# Aplicar filtro de media al ruido speckle
+roi_speckle_filtrada = cv2.blur(roi_speckle, (3, 3))
+
+# Comparar imagenes antes y despues del filtrado
+imagenes = [
+    roi_gaussiana,
+    roi_gaussiana_filtrada,
+    roi_sal_pimienta,
+    roi_sal_pimienta_filtrada,
+    roi_speckle,
+    roi_speckle_filtrada
+]
+
+titulos = [
+    "Ruido gaussiano simulado",
+    "Filtro gaussiano",
+    "Ruido sal y pimienta simulado",
+    "Filtro de mediana",
+    "Ruido speckle simulado",
+    "Filtro de media"
+]
+
+fig, ax = plt.subplots(3, 2, figsize=(10, 12))
+
+for i in range(3):
+    for j in range(2):
+        ax[i, j].imshow(imagenes[i*2+j], cmap="gray", vmin=0, vmax=255)
+        ax[i, j].set_title(titulos[i*2+j])
+        ax[i, j].axis("off")
+
+plt.tight_layout()
+plt.show()
