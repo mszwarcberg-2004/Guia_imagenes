@@ -1,6 +1,7 @@
 #Imports
 import cv2 #cv2: librería que permite abrir videos, extraer frames y procesar imagenes.
 import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
 
 #Módulo 1:  
@@ -16,6 +17,8 @@ video = cv2.VideoCapture(str(VIDEO_PATH))
 #Si el video no se puede abrir, tira error
 if not video.isOpened():
     raise ValueError("No se pudo abrir el video")
+
+#1.1.1
 
 # Obtener la cantidad de frames
 total_frames = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -41,23 +44,37 @@ plt.title("Frame representativo del video")
 plt.axis("off")
 plt.show()
 
-# Seleccionar manualmente la region del ojo
-x, y, w, h = cv2.selectROI("Seleccionar ROI", frame, False)
-cv2.destroyAllWindows()
+# Ruta donde se guarda la ROI
+ROI_PATH = CARPETA_PROYECTO / "imagenes" / "roi.png"
 
-if w == 0 or h == 0:
-    raise ValueError("No se selecciono una ROI")
+# Verificar si ya existe una ROI guardada
+if ROI_PATH.exists():
 
-# Recortar el ROI seleccionado de la imagen
-roi = frame[y:y+h, x:x+w]
+    # Si existe, cargarla directamente
+    roi = cv2.imread(str(ROI_PATH))
+    print("Se cargo la ROI guardada")
+
+else:
+
+    # Si no existe, seleccionar una nueva ROI
+    x, y, w, h = cv2.selectROI("Seleccionar ROI", frame, False)
+    cv2.destroyAllWindows()
+
+    if w == 0 or h == 0:
+        raise ValueError("No se selecciono una ROI")
+
+    roi = frame[y:y+h, x:x+w]
+
+    # Guardar la ROI seleccionada como png en mi compu
+    cv2.imwrite(str(ROI_PATH), roi)
 
 # Crear carpeta IMAGENES, donde vamos a guardar el frame y el roi
 CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
 CARPETA_IMAGENES.mkdir(exist_ok=True)
 
-# Guardar frame completo y ROI como pngs en mi compu
+# Guardar frame completo como png en mi compu
 cv2.imwrite(str(CARPETA_IMAGENES / "frame.png"), frame)
-cv2.imwrite(str(CARPETA_IMAGENES / "roi.png"), roi)
+
 
 # Visualizar ROI
 roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
@@ -82,7 +99,6 @@ print(f"Alto: {alto} pixeles")
 print(f"Cantidad de canales: {canales}")
 print(f"Profundidad de bits por canal: {bits}")
 print(f"Profundidad total por pixel: {bits * canales} bits")
-
 
 
 # 1.1.3 Resolucion espacial: submuestreo
@@ -113,7 +129,6 @@ for i, escala in enumerate(escalas):
 
 plt.tight_layout()
 plt.show()
-
 
 # 1.1.4 Cuantizacion (profundidad de bits)
 
@@ -209,4 +224,149 @@ plt.title("V - Valor")
 plt.axis("off")
 
 plt.tight_layout()
-plt.show()gis
+plt.show()
+
+#1.2.1 
+
+# Convertir el frame de BGR a escala de grises
+frame_gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+# Aumentar el brillo sumando 50 a cada pixel
+# np.clip limita las intensidades al rango [0, 255]
+frame_brillo = np.clip(frame_gris.astype(float) + 50, 0, 255).astype("uint8")
+
+# Aumentar el contraste multiplicando por 1.5
+frame_contraste = np.clip(frame_gris.astype(float) * 1.5, 0, 255).astype("uint8")
+
+# Visualizar las imagenes
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+ax[0].imshow(frame_gris, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("Frame original")
+
+ax[1].imshow(frame_brillo, cmap="gray", vmin=0, vmax=255)
+ax[1].set_title("Brillo +50")
+
+ax[2].imshow(frame_contraste, cmap="gray", vmin=0, vmax=255)
+ax[2].set_title("Contraste x1.5")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# Calcular y comparar los histogramas
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+imagenes = [frame_gris, frame_brillo, frame_contraste]
+titulos = ["Histograma original", "Brillo +50", "Contraste x1.5"]
+
+for i in range(3):
+    histograma = cv2.calcHist([imagenes[i]], [0], None, [256], [0, 256])
+    ax[i].plot(histograma)
+    ax[i].set_yscale("log") #cambiamos la escala del eje y a logarítmica
+    ax[i].set_title(titulos[i])
+    ax[i].set_xlabel("Intensidad")
+    ax[i].set_ylabel("Cantidad de pixeles")
+    ax[i].set_xlim([0, 255])
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.2.2 Escalado por rango de interes
+# Convertir la ROI a escala de grises
+roi_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+# Definir el intervalo de intensidades de interes
+f1 = np.percentile(roi_gris, 5)
+f2 = np.percentile(roi_gris, 95)
+#Para entender: f1 y f2 representan los límites inferior y superior del intervalo 
+# que se desea expandir al rango completo de 0 a 255. Agarramos el 5% y el 95% de 
+# de las intensidades de la ROI en escala de grises. De esta manera, el intervalo
+# seleccionado contiene aproximadamente el 90% central de los valores de intensidad, 
+# excluyendo los extremos de la distribución.
+
+print(f"f1 = {f1:.1f}")
+print(f"f2 = {f2:.1f}")
+
+# Aplicar transformacion lineal: las intensidades entre f1 y f2 se expanden al rango 0-255 
+#Los valores inferiores a f1 se les asigna 0 y los valores mayores a f2 se les asigna 255
+roi_escalada = (roi_gris.astype(float) - f1) * 255 / (f2 - f1)
+
+# Limitar el resultado al rango [0, 255]
+roi_escalada = np.clip(roi_escalada, 0, 255).astype("uint8")
+
+# Visualizar las imagenes
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(roi_gris, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("ROI original")
+
+ax[1].imshow(roi_escalada, cmap="gray", vmin=0, vmax=255)
+ax[1].set_title(f"Escalado lineal [{f1:.1f}, {f2:.1f}]")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# Comparar los histogramas
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+hist_original = cv2.calcHist([roi_gris], [0], None, [256], [0, 256])
+hist_escalado = cv2.calcHist([roi_escalada], [0], None, [256], [0, 256])
+
+ax[0].plot(hist_original)
+ax[0].set_title("Histograma original")
+
+ax[1].plot(hist_escalado)
+ax[1].set_title("Histograma escalado")
+
+for a in ax:
+    a.set_xlabel("Intensidad")
+    a.set_ylabel("Cantidad de pixeles")
+    a.set_xlim([0, 255])
+
+plt.tight_layout()
+plt.show()
+
+# 1.2.3 Ecualización del histograma
+
+# Ecualizacion global
+roi_ecualizada = cv2.equalizeHist(roi_gris)
+
+# Ecualizacion local (CLAHE)
+clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+roi_clahe = clahe.apply(roi_gris)
+
+# Comparar las imagenes
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+imagenes = [roi_gris, roi_escalada, roi_ecualizada, roi_clahe]
+titulos = ["ROI original", "Escalado lineal", "Ecualizacion global", "CLAHE"]
+
+for i in range(4):
+    ax[i].imshow(imagenes[i], cmap="gray", vmin=0, vmax=255)
+    ax[i].set_title(titulos[i])
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# Comparar los histogramas
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+for i in range(4):
+    histograma = cv2.calcHist([imagenes[i]], [0], None, [256], [0, 256])
+
+    ax[i].plot(histograma)
+    ax[i].set_title(titulos[i])
+    ax[i].set_xlabel("Intensidad")
+    ax[i].set_ylabel("Cantidad de pixeles")
+    ax[i].set_xlim([0, 255])
+
+plt.tight_layout()
+plt.show()
