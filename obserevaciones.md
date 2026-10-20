@@ -2,6 +2,84 @@
 # Observaciones y resultados — TP Imágenes Biomédicas
 
 ## Módulo 1. Procesamiento de imágenes
+### 1.1 Carga, muestreo y espacios de color
+
+#### 1.1.1 Extracción del frame y selección de la ROI
+
+Se extrajo un frame representativo del video registrado y se seleccionó una región de interés (ROI) centrada en la pupila y parte del iris, para trabajar específicamente sobre las estructuras que se desean analizar.
+
+**Observaciones:**
+
+En el frame completo se distingue claramente el ojo, mientras que la ROI permite observar con mayor detalle la pupila y su contorno.
+
+Sin embargo, se identifica un reflejo luminoso sobre el borde izquierdo de la pupila, que podría interferir en las etapas posteriores de detección de bordes y segmentación. Además, la ROI presenta una resolución relativamente baja, lo que limita la definición de algunos detalles.
+
+#### 1.1.2 Dimensiones y profundidad de bits
+
+Se analizaron las dimensiones, la cantidad de canales y la profundidad de bits de la ROI original.
+
+Se obtuvo una imagen de **85 × 56 píxeles**, con tres canales de color (RGB) y una profundidad de **8 bits por canal**, equivalente a 24 bits por píxel.
+
+Estas características permiten representar 256 niveles de intensidad por canal, aunque la resolución espacial limitada puede dificultar la delimitación precisa de la pupila.
+
+#### 1.1.3 Resolución espacial: submuestreo
+
+Se redujo la resolución espacial de la ROI al 50%, 25% y 5% de sus dimensiones originales, con el objetivo de evaluar la pérdida de definición.
+
+**Observaciones:**
+
+- **Resolución original (85 × 56):** permite distinguir la pupila, su contorno y algunas características del iris, aunque la imagen ya presenta cierta pixelación.
+- **Resolución al 50% (42 × 28):** la pupila sigue siendo reconocible, pero se pierden detalles finos y disminuye la definición de los bordes.
+- **Resolución al 25% (21 × 14):** aumenta considerablemente la pixelación, el contorno pupilar se vuelve más irregular y se pierde gran parte de la textura del iris.
+- **Resolución al 5% (4 × 3):** la imagen queda reducida a unos pocos píxeles y prácticamente desaparece la información necesaria para distinguir las estructuras oculares.
+
+Por lo tanto, **a medida que disminuye la resolución espacial, se pierde información sobre la forma y los detalles de la pupila**. Esto es especialmente importante para el procesamiento posterior, ya que una resolución insuficiente puede afectar la precisión de las mediciones de área y diámetro pupilar.
+
+#### 1.1.4 Cuantización: profundidad de bits
+
+Se redujo la profundidad de bits de la ROI original de 8 bits a 4 bits y 2 bits por canal, disminuyendo la cantidad de niveles de intensidad disponibles.
+
+**Observaciones:**
+
+- **8 bits:** la imagen presenta transiciones de intensidad relativamente suaves y permite distinguir la pupila del iris.
+- **4 bits:** se observan cambios más bruscos entre tonalidades y una pérdida moderada de detalles, aunque la pupila continúa siendo reconocible.
+- **2 bits:** aparece una degradación considerable de los colores y las intensidades, con regiones más uniformes y transiciones abruptas entre niveles. Se pierde gran parte de la información de textura.
+
+A diferencia del submuestreo espacial, la cuantización no reduce la cantidad de píxeles, sino la cantidad de intensidades que puede representar cada uno.
+
+En este caso, **la reducción a 2 bits genera una pérdida importante de información visual**, aunque la forma general de la pupila todavía puede distinguirse.
+
+#### 1.1.5 Espacios de color
+
+Se separó la ROI en sus tres canales RGB y se realizó la conversión al espacio HSV, visualizando las componentes H (Matiz), S (Saturación) y V (Valor) de manera independiente.
+
+**Observaciones:**
+
+**Canales RGB:**
+
+Los tres canales permiten identificar la pupila como una región oscura y distinguirla del iris. Sin embargo, presentan diferencias de intensidad y contraste según la componente de color analizada.
+
+En las imágenes obtenidas, las diferencias entre los canales no son demasiado pronunciadas y el reflejo luminoso aparece claramente en los tres.
+
+**Espacio HSV:**
+
+- **H (Matiz):** representa las diferencias de tonalidad. Se observan variaciones entre la región pupilar y el iris, aunque el resultado presenta zonas con cambios bruscos debido a la baja saturación de algunos píxeles.
+- **S (Saturación):** representa la intensidad o pureza del color y permite distinguir variaciones de saturación entre distintas regiones del iris y la pupila.
+- **V (Valor):** representa el brillo de los píxeles. La pupila se observa como una región oscura, mientras que el reflejo luminoso presenta una intensidad elevada.
+
+En esta ROI, **la componente V permite distinguir visualmente la pupila del iris de manera más clara**, ya que conserva las diferencias de luminosidad entre ambas estructuras.
+
+Sin embargo, el reflejo sigue apareciendo como una región muy brillante, por lo que la conversión de espacio de color no elimina este artefacto.
+
+#### Conclusiones generales del apartado 1.1
+
+A partir de las comparaciones realizadas, se observó que tanto la resolución espacial como la profundidad de bits influyen en la cantidad de información disponible para analizar la pupila.
+
+El submuestreo produjo una pérdida progresiva de definición, mientras que la reducción de la cuantización generó transiciones de intensidad más abruptas y una disminución de los detalles de textura.
+
+Por otra parte, la comparación de los espacios de color permitió identificar diferencias en la representación de las estructuras oculares. En particular, la componente V del espacio HSV resultó útil para distinguir las regiones oscuras de la pupila respecto del iris.
+
+En conjunto, estos resultados muestran la importancia de **conservar una resolución y profundidad de bits suficientes para preservar el contorno pupilar**, especialmente considerando que la ROI original ya presenta una resolución limitada y reflejos luminosos que pueden dificultar su procesamiento posterior.
 
 #### 1.2.1 Histograma, brillo y contraste
 
@@ -15,8 +93,8 @@ Se seleccionaron automáticamente los límites del intervalo utilizando los porc
 
 Se obtuvieron los siguientes valores:
 
-- f1 = 33
-- f2 = 99
+- f1 = 34
+- f2 = 98
 
 El intervalo seleccionado se expandió linealmente al rango de 0 a 255, aumentando la separación entre intensidades de la pupila y el iris. A los valores menores a f1 se les asignó 0 y a los mayores a f2, 255.
 
