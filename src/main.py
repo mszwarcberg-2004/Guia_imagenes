@@ -914,3 +914,690 @@ for nombre, imagen in imagenes_filtradas.items():
     print(f"\nFiltro: {nombre}")
     print(f"PSNR: {psnr_valor:.2f} dB")
     print(f"SSIM: {ssim_valor:.4f}")
+
+
+# MODULO 2: Segmentacion y morfologia matematica de la pupila
+
+# 2.1.1 Umbralizacion automatica de Otsu
+
+# Utilizamos la ROI original en escala de grises
+imagen_otsu = roi_gris
+
+# Calcular automaticamente el umbral mediante Otsu
+umbral, mascara_otsu = cv2.threshold(
+    imagen_otsu,
+    0,
+    255,
+    cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+)
+
+print(f"Umbral calculado por Otsu: {umbral}")
+
+# Visualizar la ROI y la mascara obtenida
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(imagen_otsu, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(mascara_otsu, cmap="gray", vmin=0, vmax=255)
+ax[1].set_title("Segmentacion mediante Otsu")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.1.2 Segmentacion mediante K-Means
+
+# Trabajamos con la ROI original en escala de grises
+imagen_kmeans = roi_gris
+
+# Convertir la imagen en una lista de pixeles
+pixeles = imagen_kmeans.reshape(-1, 1).astype(np.float32)
+
+# Criterio de finalizacion del algoritmo
+criterio = (
+    cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+    100,
+    0.2
+)
+
+# Guardar las mascaras para compararlas despues
+mascaras_kmeans = {}
+
+fig, ax = plt.subplots(2, 4, figsize=(14, 7))
+
+for i, k in enumerate([2, 3, 4, 5]):
+
+    # Aplicar K-Means
+    _, etiquetas, centros = cv2.kmeans(
+        pixeles,
+        k,
+        None,
+        criterio,
+        10,
+        cv2.KMEANS_PP_CENTERS
+    )
+
+    # Reconstruir la imagen agrupada
+    centros_uint8 = np.uint8(centros)
+
+    imagen_agrupada = centros_uint8[
+        etiquetas.flatten()
+    ].reshape(imagen_kmeans.shape)
+
+    # Identificar el grupo de menor intensidad
+    grupo_oscuro = np.argmin(centros.flatten())
+
+    # Crear mascara binaria
+    mascara = (
+        etiquetas.flatten() == grupo_oscuro
+    ).reshape(imagen_kmeans.shape).astype(np.uint8) * 255
+
+    mascaras_kmeans[k] = mascara
+
+    # Visualizar imagen agrupada
+    ax[0, i].imshow(
+        imagen_agrupada, cmap="gray",
+        vmin=0, vmax=255
+    )
+    ax[0, i].set_title(f"K-Means K={k}")
+
+    # Visualizar mascara del grupo mas oscuro
+    ax[1, i].imshow(
+        mascara, cmap="gray",
+        vmin=0, vmax=255
+    )
+    ax[1, i].set_title(f"Grupo mas oscuro K={k}")
+
+    print(f"K={k}: centros = {np.sort(centros.flatten())}")
+
+for fila in ax:
+    for a in fila:
+        a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+
+# 2.1.3 Segmentacion mediante contornos activos (Snakes)
+
+from skimage.segmentation import active_contour
+from skimage.filters import gaussian
+
+# Imagen de trabajo en escala de grises
+imagen_snake = roi_gris.astype(float) / 255.0
+
+# Suavizar para reducir pequenas variaciones
+imagen_snake_suavizada = gaussian(
+    imagen_snake, sigma=1
+)
+
+# Dimensiones de la ROI
+alto, ancho = roi_gris.shape
+
+# Definir contorno inicial circular
+centro_x = ancho / 2
+centro_y = alto / 2
+
+radio_inicial = min(alto, ancho) * 0.35
+
+# Crear puntos del circulo
+angulo = np.linspace(0, 2*np.pi, 120, endpoint=False)
+
+# Coordenadas en formato fila, columna
+contorno_inicial = np.array([
+    centro_y + radio_inicial * np.sin(angulo),
+    centro_x + radio_inicial * np.cos(angulo)
+]).T
+
+# Aplicar contorno activo
+contorno_final = active_contour(
+    imagen_snake_suavizada,
+    contorno_inicial,
+    alpha=0.015,
+    beta=10,
+    gamma=0.001,
+    w_line=0,
+    w_edge=1,
+    max_num_iter=2500,
+    boundary_condition="periodic"
+)
+
+# Crear mascara binaria a partir del contorno final
+mascara_snake = np.zeros_like(roi_gris, dtype=np.uint8)
+
+# OpenCV utiliza coordenadas columna, fila
+puntos_snake = np.round(
+    contorno_final[:, ::-1]
+).astype(np.int32)
+
+cv2.fillPoly(
+    mascara_snake,
+    [puntos_snake],
+    255
+)
+
+# Visualizar el contorno inicial y final
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(roi_gris, cmap="gray")
+ax[0].plot(
+    contorno_inicial[:, 1],
+    contorno_inicial[:, 0],
+    "--r",
+    label="Contorno inicial"
+)
+ax[0].plot(
+    contorno_final[:, 1],
+    contorno_final[:, 0],
+    "-g",
+    label="Contorno final"
+)
+ax[0].set_title("Segmentacion con Snakes")
+ax[0].legend()
+
+ax[1].imshow(
+    mascara_snake,
+    cmap="gray",
+    vmin=0, vmax=255
+)
+ax[1].set_title("Mascara obtenida con Snakes")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.1.4 Segmentacion mediante Watershed
+
+# Imagen de trabajo
+imagen_ws = roi_gris.copy()
+
+# Suavizado gaussiano para reducir variaciones locales
+imagen_ws_filtrada = cv2.GaussianBlur(
+    imagen_ws, (3, 3), 0
+)
+
+# Utilizar la mascara de Otsu para definir regiones iniciales
+binaria = (mascara_otsu > 0).astype(np.uint8)
+
+# Componentes conectadas para identificar la pupila
+cantidad, etiquetas, estadisticas, centroides = (
+    cv2.connectedComponentsWithStats(binaria, 8)
+)
+
+alto_ws, ancho_ws = imagen_ws.shape
+centro_roi = np.array([ancho_ws / 2, alto_ws / 2])
+
+# Elegir la componente mas cercana al centro de la ROI
+componentes = list(range(1, cantidad))
+
+componente_pupila = min(
+    componentes,
+    key=lambda i: np.linalg.norm(
+        centroides[i] - centro_roi
+    )
+)
+
+# Mascara aproximada de la pupila
+mascara_inicial = (
+    etiquetas == componente_pupila
+).astype(np.uint8)
+
+# Limpiar pequenas irregularidades
+kernel_ws = np.ones((3, 3), np.uint8)
+
+mascara_inicial = cv2.morphologyEx(
+    mascara_inicial,
+    cv2.MORPH_CLOSE,
+    kernel_ws
+)
+
+# Crear marcadores para Watershed
+# 0 = zona desconocida
+# 1 = fondo
+# 2 = pupila
+
+marcadores = np.zeros_like(
+    imagen_ws, dtype=np.int32
+)
+
+# Definir fondo seguro mediante dilatacion
+region_dilatada = cv2.dilate(
+    mascara_inicial, kernel_ws, iterations=3
+)
+
+marcadores[region_dilatada == 0] = 1
+
+# Definir pupila segura mediante erosion
+pupila_segura = cv2.erode(
+    mascara_inicial, kernel_ws, iterations=2
+)
+
+marcadores[pupila_segura == 1] = 2
+
+# Convertir la imagen a BGR para cv2.watershed
+imagen_ws_bgr = cv2.cvtColor(
+    imagen_ws_filtrada, cv2.COLOR_GRAY2BGR
+)
+
+# Aplicar Watershed
+marcadores_resultado = cv2.watershed(
+    imagen_ws_bgr, marcadores.copy()
+)
+
+# Obtener mascara final de la pupila
+mascara_watershed = (
+    marcadores_resultado == 2
+).astype(np.uint8) * 255
+
+# Visualizar resultados
+fig, ax = plt.subplots(1, 3, figsize=(13, 4))
+
+ax[0].imshow(imagen_ws, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(
+    mascara_inicial, cmap="gray",
+    vmin=0, vmax=1
+)
+ax[1].set_title("Mascara inicial")
+
+ax[2].imshow(
+    mascara_watershed, cmap="gray",
+    vmin=0, vmax=255
+)
+ax[2].set_title("Mascara Watershed")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.1.5 Comparacion de los metodos mediante Dice
+
+# A. Crear o cargar la mascara de referencia manual
+
+REFERENCIA_PATH = CARPETA_PROYECTO / "imagenes" / "mascara_referencia.png"
+
+if REFERENCIA_PATH.exists():
+
+    mascara_referencia = cv2.imread(
+        str(REFERENCIA_PATH),
+        cv2.IMREAD_GRAYSCALE
+    )
+
+    if mascara_referencia.shape != roi_gris.shape:
+        raise ValueError(
+            "La mascara de referencia no tiene las dimensiones de la ROI"
+        )
+
+    print("Se cargo la mascara de referencia guardada")
+
+else:
+
+    # Mostrar la ROI para marcar manualmente la pupila
+    fig, ax = plt.subplots(figsize=(7, 6))
+
+    ax.imshow(roi_gris, cmap="gray", vmin=0, vmax=255)
+    ax.set_title(
+        "Marcar puntos alrededor del contorno pupilar\n"
+        "Presionar Enter para finalizar"
+    )
+
+    print("Hace clic alrededor del borde real de la pupila.")
+    print("Presiona Enter cuando termines.")
+
+    puntos = plt.ginput(n=-1, timeout=0)
+    plt.close(fig)
+
+    if len(puntos) < 3:
+        raise ValueError(
+            "Se necesitan al menos 3 puntos para definir el contorno"
+        )
+
+    # Convertir los puntos seleccionados a coordenadas de pixeles
+    puntos = np.round(puntos).astype(np.int32)
+
+    # Crear mascara binaria manual
+    mascara_referencia = np.zeros_like(
+        roi_gris, dtype=np.uint8
+    )
+
+    cv2.fillPoly(
+        mascara_referencia,
+        [puntos],
+        255
+    )
+
+    # Guardar para reutilizar la misma referencia
+    REFERENCIA_PATH.parent.mkdir(
+        parents=True, exist_ok=True
+    )
+
+    cv2.imwrite(
+        str(REFERENCIA_PATH),
+        mascara_referencia
+    )
+
+
+# B. Funcion para calcular Dice
+
+def calcular_dice(mascara1, mascara2):
+
+    # Convertir ambas mascaras a booleanas
+    m1 = mascara1 > 0
+    m2 = mascara2 > 0
+
+    interseccion = np.logical_and(m1, m2).sum()
+
+    total = m1.sum() + m2.sum()
+
+    if total == 0:
+        return 1.0
+
+    dice = 2 * interseccion / total
+
+    return dice
+
+
+# C. Comparar los cuatro metodos
+
+mascaras_segmentacion = {
+    "Otsu": mascara_otsu,
+    "K-Means K=2": mascaras_kmeans[2],
+    "K-Means K=3": mascaras_kmeans[3],
+    "K-Means K=4": mascaras_kmeans[4],
+    "K-Means K=5": mascaras_kmeans[5],
+    "Snakes": mascara_snake,
+    "Watershed": mascara_watershed
+}
+
+resultados_dice = {}
+
+print("\n--- Comparacion de segmentaciones mediante Dice ---")
+
+for nombre, mascara in mascaras_segmentacion.items():
+
+    valor_dice = calcular_dice(
+        mascara_referencia,
+        mascara
+    )
+
+    resultados_dice[nombre] = valor_dice
+
+    print(f"{nombre}: Dice = {valor_dice:.4f}")
+
+
+# D. Identificar el metodo con mayor Dice
+
+mejor_metodo = max(
+    resultados_dice,
+    key=resultados_dice.get
+)
+
+mejor_mascara = mascaras_segmentacion[mejor_metodo].copy()
+
+print(f"\nMejor metodo: {mejor_metodo}")
+print(f"Dice obtenido: {resultados_dice[mejor_metodo]:.4f}")
+
+
+# E. Visualizar la referencia y el mejor resultado
+
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+ax[0].imshow(roi_gris, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(
+    mascara_referencia,
+    cmap="gray",
+    vmin=0, vmax=255
+)
+ax[1].set_title("Referencia manual")
+
+ax[2].imshow(
+    mejor_mascara,
+    cmap="gray",
+    vmin=0, vmax=255
+)
+ax[2].set_title(f"Mejor metodo: {mejor_metodo}")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+
+# 2.2.1 Operaciones morfologicas
+
+# Utilizar la mascara con mayor Dice del apartado 2.1
+mascara_base = mejor_mascara.copy()
+
+print(f"Metodo seleccionado para morfologia: {mejor_metodo}")
+
+# Elemento estructurante eliptico de 3x3
+kernel_morf = cv2.getStructuringElement(
+    cv2.MORPH_ELLIPSE, (3, 3)
+)
+
+# Erosion: reduce las regiones blancas
+mascara_erosion = cv2.erode(
+    mascara_base, kernel_morf, iterations=1
+)
+
+# Dilatacion: expande las regiones blancas
+mascara_dilatacion = cv2.dilate(
+    mascara_base, kernel_morf, iterations=1
+)
+
+# Apertura: erosion seguida de dilatacion
+mascara_apertura = cv2.morphologyEx(
+    mascara_base,
+    cv2.MORPH_OPEN,
+    kernel_morf
+)
+
+# Cierre: dilatacion seguida de erosion
+mascara_cierre = cv2.morphologyEx(
+    mascara_base,
+    cv2.MORPH_CLOSE,
+    kernel_morf
+)
+
+# Comparacion visual
+imagenes_morf = [
+    mascara_base,
+    mascara_erosion,
+    mascara_dilatacion,
+    mascara_apertura,
+    mascara_cierre
+]
+
+titulos_morf = [
+    "Mascara original",
+    "Erosion",
+    "Dilatacion",
+    "Apertura",
+    "Cierre"
+]
+
+fig, ax = plt.subplots(1, 5, figsize=(16, 4))
+
+for i in range(5):
+    ax[i].imshow(
+        imagenes_morf[i],
+        cmap="gray",
+        vmin=0,
+        vmax=255
+    )
+    ax[i].set_title(titulos_morf[i])
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.2.2 Esqueletizacion de la pupila
+
+from skimage.morphology import skeletonize
+
+# Utilizar la mascara del mejor metodo de segmentacion
+mascara_binaria = mascara_base > 0
+
+# Aplicar esqueletizacion
+esqueleto_pupila = skeletonize(mascara_binaria)
+
+# Visualizar resultados
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(mascara_base, cmap="gray")
+ax[0].set_title("Mascara pupilar original")
+
+ax[1].imshow(esqueleto_pupila, cmap="gray")
+ax[1].set_title("Esqueleto de la pupila")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+
+# 2.2.3 Comparacion de mascaras mediante Dice e IoU
+
+# Funcion para calcular IoU
+def calcular_iou(mascara1, mascara2):
+
+    m1 = mascara1 > 0
+    m2 = mascara2 > 0
+
+    interseccion = np.logical_and(m1, m2).sum()
+    union = np.logical_or(m1, m2).sum()
+
+    if union == 0:
+        return 1.0
+
+    return interseccion / union
+
+
+# Mascaras que vamos a comparar
+mascaras_morfologicas = {
+    "Sin morfologia": mascara_base,
+    "Erosion": mascara_erosion,
+    "Dilatacion": mascara_dilatacion,
+    "Apertura": mascara_apertura,
+    "Cierre": mascara_cierre
+}
+
+resultados_morfologia = {}
+
+print("\n--- Comparacion de operaciones morfologicas ---")
+
+for nombre, mascara in mascaras_morfologicas.items():
+
+    # Reutilizamos la funcion Dice del apartado 2.1
+    dice = calcular_dice(
+        mascara_referencia,
+        mascara
+    )
+
+    iou = calcular_iou(
+        mascara_referencia,
+        mascara
+    )
+
+    resultados_morfologia[nombre] = {
+        "Dice": dice,
+        "IoU": iou
+    }
+
+    print(f"\nOperacion: {nombre}")
+    print(f"Dice = {dice:.4f}")
+    print(f"IoU  = {iou:.4f}")
+
+
+# Seleccionar la mascara con mayor Dice
+mejor_operacion = max(
+    resultados_morfologia,
+    key=lambda nombre: resultados_morfologia[nombre]["Dice"]
+)
+
+mascara_final = mascaras_morfologicas[
+    mejor_operacion
+].copy()
+
+print("\n--- Resultado final del Modulo 2 ---")
+print(f"Metodo de segmentacion: {mejor_metodo}")
+print(f"Operacion morfologica: {mejor_operacion}")
+print(
+    f"Dice final: "
+    f"{resultados_morfologia[mejor_operacion]['Dice']:.4f}"
+)
+print(
+    f"IoU final: "
+    f"{resultados_morfologia[mejor_operacion]['IoU']:.4f}"
+)
+
+
+# Visualizar la mascara de referencia y la final
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+ax[0].imshow(roi_gris, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(
+    mascara_referencia,
+    cmap="gray",
+    vmin=0,
+    vmax=255
+)
+ax[1].set_title("Referencia manual")
+
+ax[2].imshow(
+    mascara_final,
+    cmap="gray",
+    vmin=0,
+    vmax=255
+)
+ax[2].set_title(
+    f"{mejor_metodo} + {mejor_operacion}"
+)
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Guardar la mascara final del Modulo 2
+
+CARPETA_RESULTADOS = CARPETA_PROYECTO / "resultados"
+
+CARPETA_RESULTADOS.mkdir(
+    parents=True,
+    exist_ok=True
+)
+
+RUTA_MASCARA_FINAL = (
+    CARPETA_RESULTADOS / "mascara_pupila_final.png"
+)
+
+cv2.imwrite(
+    str(RUTA_MASCARA_FINAL),
+    mascara_final
+)
+
+print(f"\nMascara final guardada en: {RUTA_MASCARA_FINAL}")
