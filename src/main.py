@@ -7,16 +7,15 @@ from pathlib import Path
 #Módulo 1:  
 
 # Ruta del video
-CARPETA_PROYECTO = Path(__file__).resolve().parent.parent
+CARPETA_PROYECTO =CARPETA_PROYECTO = Path.cwd()
 VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video1.mov"
-#__file__ es la ubicacion del archivo que estamos trabajando, en este caso main.py
 
 # Abrir el video
 video = cv2.VideoCapture(str(VIDEO_PATH))
 
 #Si el video no se puede abrir, tira error
 if not video.isOpened():
-    raise ValueError("No se pudo abrir el video")
+    raise ValueEror("No se pudo abrir el <video")
 
 #1.1.1
 
@@ -1599,5 +1598,4 @@ cv2.imwrite(
     str(RUTA_MASCARA_FINAL),
     mascara_final
 )
-
 print(f"\nMascara final guardada en: {RUTA_MASCARA_FINAL}")
