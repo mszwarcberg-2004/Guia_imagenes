@@ -379,7 +379,6 @@ plt.show()
 
 # 1.2.4 Analisis de ruido y filtrado espacial
 
-
 # A. Aplicacion de filtros sobre la ROI original (sin ruido simulado)
 
 # Filtro de media
@@ -492,7 +491,7 @@ titulos = [
     "Filtro de media"
 ]
 
-fig, ax = plt.subplots(3, 2, figsize=(10, 12))
+fig, ax = plt.subplots(3, 2, figsize=(8, 6))
 
 for i in range(3):
     for j in range(2):
@@ -502,3 +501,751 @@ for i in range(3):
 
 plt.tight_layout()
 plt.show()
+
+
+# 1.3 Deteccion de bordes y dominio frecuencial
+
+# 1.3.1 Deteccion de bordes
+
+# Imagen original y filtrada en el punto 1.2.4
+imagen_original = roi_gris
+imagen_filtrada = roi_filtro_gaussiano
+
+# Funcion para aplicar los cinco operadores
+def detectar_bordes(imagen):
+
+    imagen_float = imagen.astype(np.float32)
+
+    # Roberts
+    kernel_roberts_x = np.array([[1, 0],
+                                 [0, -1]], dtype=np.float32)
+
+    kernel_roberts_y = np.array([[0, 1],
+                                 [-1, 0]], dtype=np.float32)
+
+    roberts_x = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_roberts_x
+    )
+    roberts_y = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_roberts_y
+    )
+
+    roberts = cv2.magnitude(roberts_x, roberts_y)
+
+    # Sobel
+    sobel_x = cv2.Sobel(imagen, cv2.CV_32F, 1, 0, ksize=3)
+    sobel_y = cv2.Sobel(imagen, cv2.CV_32F, 0, 1, ksize=3)
+
+    sobel = cv2.magnitude(sobel_x, sobel_y)
+
+    # Prewitt
+    kernel_prewitt_x = np.array([[-1, 0, 1],
+                                 [-1, 0, 1],
+                                 [-1, 0, 1]], dtype=np.float32)
+
+    kernel_prewitt_y = np.array([[-1, -1, -1],
+                                 [0, 0, 0],
+                                 [1, 1, 1]], dtype=np.float32)
+
+    prewitt_x = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_prewitt_x
+    )
+    prewitt_y = cv2.filter2D(
+        imagen_float, cv2.CV_32F, kernel_prewitt_y
+    )
+
+    prewitt = cv2.magnitude(prewitt_x, prewitt_y)
+
+    # Laplaciano
+    laplaciano = cv2.Laplacian(
+        imagen, cv2.CV_32F, ksize=3
+    )
+    laplaciano = np.abs(laplaciano)
+
+    # Canny
+    canny = cv2.Canny(imagen, 50, 150)
+
+    return [roberts, sobel, prewitt, laplaciano, canny]
+
+
+# Aplicar los operadores a ambas imagenes
+bordes_original = detectar_bordes(imagen_original)
+bordes_filtrada = detectar_bordes(imagen_filtrada)
+
+nombres = ["Roberts", "Sobel", "Prewitt",
+           "Laplaciano", "Canny"]
+
+# Comparacion visual
+fig, ax = plt.subplots(2, 6, figsize=(18, 7))
+
+ax[0, 0].imshow(imagen_original, cmap="gray")
+ax[0, 0].set_title("ROI original")
+
+ax[1, 0].imshow(imagen_filtrada, cmap="gray")
+ax[1, 0].set_title("ROI filtrada - Gaussiano")
+
+for i in range(5):
+
+    # Usamos la misma escala por operador
+    # para comparar original y filtrada
+    limite = max(
+        np.max(bordes_original[i]),
+        np.max(bordes_filtrada[i]),
+        1
+    )
+
+    ax[0, i+1].imshow(
+        bordes_original[i], cmap="gray",
+        vmin=0, vmax=limite
+    )
+    ax[0, i+1].set_title(nombres[i] + " - Original")
+
+    ax[1, i+1].imshow(
+        bordes_filtrada[i], cmap="gray",
+        vmin=0, vmax=limite
+    )
+    ax[1, i+1].set_title(nombres[i] + " - Filtrada")
+
+for fila in ax:
+    for a in fila:
+        a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.2 Transformada de Fourier 2D
+
+# Calcular la transformada de Fourier de la ROI original
+F_original = np.fft.fft2(roi_gris)
+
+# Centrar las frecuencias bajas
+F_original_centrada = np.fft.fftshift(F_original)
+
+# Obtener magnitud y fase
+magnitud_original = np.abs(F_original_centrada)
+fase_original = np.angle(F_original_centrada)
+
+# Representar la magnitud en escala logaritmica
+magnitud_log = np.log1p(magnitud_original)
+
+# Visualizar la imagen, magnitud y fase
+fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+ax[0].imshow(roi_gris, cmap="gray")
+ax[0].set_title("ROI original")
+
+ax[1].imshow(magnitud_log, cmap="gray")
+ax[1].set_title("Magnitud (log)")
+
+ax[2].imshow(fase_original, cmap="gray",
+             vmin=-np.pi, vmax=np.pi)
+ax[2].set_title("Fase")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# A. Reconstruccion utilizando solo magnitud
+
+# Conservar magnitud y establecer fase igual a cero
+F_solo_magnitud = magnitud_original
+
+recon_magnitud = np.fft.ifft2(
+    np.fft.ifftshift(F_solo_magnitud)
+).real
+
+
+# B. Reconstruccion utilizando solo fase
+
+# Conservar fase y establecer magnitud igual a uno
+F_solo_fase = np.exp(1j * fase_original)
+
+recon_fase = np.fft.ifft2(
+    np.fft.ifftshift(F_solo_fase)
+).real
+
+
+# C. Cruzar magnitud y fase de dos imagenes
+
+# Fourier de la ROI filtrada con gaussiano
+F_gaussiana = np.fft.fftshift(
+    np.fft.fft2(roi_filtro_gaussiano)
+)
+
+magnitud_gaussiana = np.abs(F_gaussiana)
+fase_gaussiana = np.angle(F_gaussiana)
+
+# Magnitud original + fase gaussiana
+F_cruzada_1 = magnitud_original * np.exp(
+    1j * fase_gaussiana
+)
+
+recon_cruzada_1 = np.fft.ifft2(
+    np.fft.ifftshift(F_cruzada_1)
+).real
+
+# Magnitud gaussiana + fase original
+F_cruzada_2 = magnitud_gaussiana * np.exp(
+    1j * fase_original
+)
+
+recon_cruzada_2 = np.fft.ifft2(
+    np.fft.ifftshift(F_cruzada_2)
+).real
+
+
+# D. Visualizacion comparativa
+
+# Normalizar cada reconstruccion para visualizarla
+def normalizar_imagen(imagen):
+    return cv2.normalize(
+        imagen.astype(np.float32),
+        None, 0, 255, cv2.NORM_MINMAX
+    )
+
+imagenes = [
+    roi_gris,
+    recon_magnitud,
+    recon_fase,
+    recon_cruzada_1,
+    recon_cruzada_2
+]
+
+titulos = [
+    "ROI original",
+    "Solo magnitud",
+    "Solo fase",
+    "Magnitud original + fase gaussiana",
+    "Magnitud gaussiana + fase original"
+]
+
+fig, ax = plt.subplots(1, 5, figsize=(18, 4))
+
+for i in range(5):
+    ax[i].imshow(
+        normalizar_imagen(imagenes[i]),
+        cmap="gray"
+    )
+    ax[i].set_title(titulos[i], fontsize=9)
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.3 Densidad espectral de potencia (PSD)
+
+# Calcular la transformada de Fourier de la ROI original y filtrada
+F_original_psd = np.fft.fftshift(
+    np.fft.fft2(roi_gris.astype(float))
+)
+
+F_gaussiana_psd = np.fft.fftshift(
+    np.fft.fft2(roi_filtro_gaussiano.astype(float))
+)
+
+# Calcular la PSD como el cuadrado de la magnitud
+psd_original = np.abs(F_original_psd)**2
+psd_gaussiana = np.abs(F_gaussiana_psd)**2
+
+# Aplicar escala logaritmica para visualizar mejor
+psd_original_log = np.log1p(psd_original)
+psd_gaussiana_log = np.log1p(psd_gaussiana)
+
+# Usar la misma escala para comparar las dos imagenes
+escala_maxima = max(
+    np.max(psd_original_log),
+    np.max(psd_gaussiana_log)
+)
+
+# Visualizar las PSD
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+ax[0].imshow(
+    psd_original_log,
+    cmap="gray",
+    vmin=0,
+    vmax=escala_maxima
+)
+ax[0].set_title("PSD - ROI original")
+
+ax[1].imshow(
+    psd_gaussiana_log,
+    cmap="gray",
+    vmin=0,
+    vmax=escala_maxima
+)
+ax[1].set_title("PSD - ROI filtrada (Gaussiano)")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 1.3.4 Filtrado en el dominio frecuencial
+
+# Calcular la transformada de Fourier del frame completo
+F_frame = np.fft.fft2(frame_gris.astype(float))
+
+# Centrar las frecuencias bajas
+F_frame_centrada = np.fft.fftshift(F_frame)
+
+# Obtener las dimensiones del frame
+alto_frame, ancho_frame = frame_gris.shape
+
+# Crear coordenadas para calcular la distancia al centro
+Y, X = np.ogrid[:alto_frame, :ancho_frame]
+
+centro_y = alto_frame // 2
+centro_x = ancho_frame // 2
+
+distancia = np.sqrt(
+    (X - centro_x)**2 + (Y - centro_y)**2
+)
+
+# Definir una frecuencia de corte inicial
+D0 = 0.10 * min(alto_frame, ancho_frame)
+
+# Crear las mascaras de filtrado
+# Pasa-bajos: conserva frecuencias cercanas al centro
+H_pasabajos = (distancia <= D0).astype(float)
+
+# Pasa-altos: conserva frecuencias alejadas del centro
+H_pasaaltos = (distancia > D0).astype(float)
+
+# Aplicar las mascaras en el dominio frecuencial
+F_pasabajos = F_frame_centrada * H_pasabajos
+F_pasaaltos = F_frame_centrada * H_pasaaltos
+
+# Reconstruir las imagenes mediante transformada inversa
+frame_pasabajos = np.fft.ifft2(
+    np.fft.ifftshift(F_pasabajos)
+).real
+
+frame_pasaaltos = np.fft.ifft2(
+    np.fft.ifftshift(F_pasaaltos)
+).real
+
+# Aplicar filtro gaussiano en el dominio espacial
+# para comparar ambos tipos de filtrado
+frame_gaussiano = cv2.GaussianBlur(
+    frame_gris, (5, 5), 0
+)
+
+# Visualizar las imagenes
+fig, ax = plt.subplots(1, 4, figsize=(16, 4))
+
+ax[0].imshow(frame_gris, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("Frame original")
+
+ax[1].imshow(frame_pasabajos, cmap="gray",
+             vmin=0, vmax=255)
+ax[1].set_title("Pasa-bajos frecuencial")
+
+# El pasa-altos puede contener valores negativos.
+# Centramos la visualizacion en cero para observar bordes.
+limite = max(np.max(np.abs(frame_pasaaltos)), 1)
+
+ax[2].imshow(frame_pasaaltos, cmap="gray",
+             vmin=-limite, vmax=limite)
+ax[2].set_title("Pasa-altos frecuencial")
+
+ax[3].imshow(frame_gaussiano, cmap="gray",
+             vmin=0, vmax=255)
+ax[3].set_title("Gaussiano espacial")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Visualizar las mascaras frecuenciales
+fig, ax = plt.subplots(1, 2, figsize=(8, 4))
+
+ax[0].imshow(H_pasabajos, cmap="gray")
+ax[0].set_title("Mascara pasa-bajos")
+
+ax[1].imshow(H_pasaaltos, cmap="gray")
+ax[1].set_title("Mascara pasa-altos")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+# Preguntas finales del 1.3 - PSNR y SSIM
+
+from skimage.metrics import structural_similarity as ssim
+
+# Imagen de referencia: ROI original
+imagen_referencia = roi_gris
+
+# Imagenes obtenidas con los filtros espaciales del 1.2.4
+imagenes_filtradas = {
+    "Media": roi_media,
+    "Mediana": roi_mediana,
+    "Gaussiano": roi_filtro_gaussiano
+}
+
+# Calcular PSNR y SSIM para cada filtro
+print("\n--- Comparacion PSNR y SSIM ---")
+
+for nombre, imagen in imagenes_filtradas.items():
+
+    # PSNR: compara las diferencias de intensidad
+    psnr_valor = cv2.PSNR(imagen_referencia, imagen)
+
+    # SSIM: compara la similitud estructural
+    ssim_valor = ssim(
+        imagen_referencia,
+        imagen,
+        data_range=255
+    )
+
+    print(f"\nFiltro: {nombre}")
+    print(f"PSNR: {psnr_valor:.2f} dB")
+    print(f"SSIM: {ssim_valor:.4f}")
+
+
+
+# MODULO 2: Segmentacion y morfologia matematica de la pupila
+
+from skimage.segmentation import active_contour, watershed
+from skimage.filters import sobel
+
+
+# 2.1 Algoritmos de segmentacion
+
+# Trabajamos sobre una copia de la ROI original en escala de grises
+# No aplicamos ningun filtro adicional
+imagen_segmentacion = roi_gris.copy()
+
+
+# 2.1.1 Umbralizacion automatica de Otsu
+
+umbral_otsu, mascara_otsu = cv2.threshold(
+    imagen_segmentacion,
+    0,
+    255,
+    cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+)
+
+print(f"Umbral calculado por Otsu: {umbral_otsu}")
+
+# Comparar la ROI, el histograma y la mascara
+fig, ax = plt.subplots(1, 3, figsize=(11, 3))
+
+ax[0].imshow(imagen_segmentacion, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("ROI original")
+ax[0].axis("off")
+
+ax[1].hist(imagen_segmentacion.ravel(), bins=256, range=(0, 256))
+ax[1].axvline(
+    umbral_otsu,
+    color="red",
+    linestyle="--",
+    label=f"Otsu = {umbral_otsu:.0f}"
+)
+ax[1].set_title("Histograma")
+ax[1].set_xlabel("Intensidad")
+ax[1].set_ylabel("Cantidad de pixeles")
+ax[1].legend()
+
+ax[2].imshow(mascara_otsu, cmap="gray", vmin=0, vmax=255)
+ax[2].set_title("Mascara Otsu")
+ax[2].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.1.2 Agrupamiento K-Means
+
+# Cada pixel es una muestra y su intensidad es la caracteristica
+datos = imagen_segmentacion.reshape(-1, 1).astype(np.float32)
+
+# Criterio de convergencia
+criterio = (
+    cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+    100,
+    0.2
+)
+
+# Semilla para obtener resultados reproducibles
+cv2.setRNGSeed(42)
+
+mascaras_kmeans = {}
+
+# Probar diferentes cantidades de clusters
+for k in range(2, 6):
+
+    # Agrupar pixeles segun sus intensidades
+    _, etiquetas, centros = cv2.kmeans(
+        datos,
+        k,
+        None,
+        criterio,
+        10,
+        cv2.KMEANS_PP_CENTERS
+    )
+
+    # Identificar el cluster de menor intensidad
+    grupo_oscuro = np.argmin(centros.flatten())
+
+    # Crear mascara binaria del cluster mas oscuro
+    mascara = (etiquetas.flatten() == grupo_oscuro).astype(np.uint8) * 255
+
+    # Recuperar las dimensiones originales de la ROI
+    mascara = mascara.reshape(imagen_segmentacion.shape)
+
+    mascaras_kmeans[k] = mascara
+
+    print(f"K={k} - Centroides: {np.sort(centros.flatten())}")
+
+# Usamos K=3 para la comparacion general inicial
+mascara_kmeans = mascaras_kmeans[3]
+
+
+# Comparacion de K-Means con distintos K
+fig, ax = plt.subplots(1, 5, figsize=(13, 3))
+
+ax[0].imshow(imagen_segmentacion, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("ROI original")
+
+for i, k in enumerate(range(2, 6)):
+    ax[i+1].imshow(
+        mascaras_kmeans[k],
+        cmap="gray",
+        vmin=0,
+        vmax=255
+    )
+    ax[i+1].set_title(f"K-Means K={k}")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Inicializacion para Snakes y Watershed
+
+# Mostrar la ROI para seleccionar:
+# 1. Centro de la pupila
+# 2. Un punto del borde de la pupila
+plt.figure(figsize=(8, 5))
+plt.imshow(imagen_segmentacion, cmap="gray", vmin=0, vmax=255)
+plt.title("Click 1: centro de pupila | Click 2: borde")
+plt.axis("off")
+
+puntos = plt.ginput(2, timeout=0)
+plt.close()
+
+if len(puntos) != 2:
+    raise ValueError("Se deben seleccionar dos puntos")
+
+centro_x, centro_y = puntos[0]
+borde_x, borde_y = puntos[1]
+
+# Calcular radio aproximado de la pupila
+radio = np.sqrt(
+    (borde_x - centro_x)**2 +
+    (borde_y - centro_y)**2
+)
+
+if radio < 3:
+    raise ValueError("El radio seleccionado es demasiado pequeno")
+
+# Dimensiones de la ROI
+alto_roi, ancho_roi = imagen_segmentacion.shape
+
+# Verificar que el centro este dentro de la ROI
+if not (0 <= centro_x < ancho_roi and 0 <= centro_y < alto_roi):
+    raise ValueError("El centro seleccionado esta fuera de la ROI")
+
+# Imagen normalizada para Snakes y Watershed
+region_normalizada = imagen_segmentacion.astype(np.float64) / 255.0
+
+
+# 2.1.3 Contornos activos (Snakes)
+
+# Crear un contorno circular inicial alrededor de la pupila
+angulos = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+# Inicializamos ligeramente por fuera del borde seleccionado
+radio_inicial = 1.15 * radio
+
+# Evitar que el contorno inicial salga de la ROI
+distancia_borde = min(
+    centro_x,
+    centro_y,
+    ancho_roi - 1 - centro_x,
+    alto_roi - 1 - centro_y
+)
+
+radio_inicial = min(radio_inicial, 0.95 * distancia_borde)
+
+if radio_inicial <= 0:
+    raise ValueError("No hay espacio para inicializar el contorno")
+
+# Coordenadas de los puntos del contorno inicial
+contorno_inicial = np.column_stack((
+    centro_y + radio_inicial * np.sin(angulos),
+    centro_x + radio_inicial * np.cos(angulos)
+))
+
+# Ajustar iterativamente el contorno segun energias internas y externas
+contorno_final = active_contour(
+    region_normalizada,
+    contorno_inicial,
+    alpha=0.01,
+    beta=5.0,
+    gamma=0.01,
+    w_line=0,
+    w_edge=0.3,
+    max_num_iter=1000,
+    boundary_condition="periodic"
+)
+
+# Crear mascara binaria de Snakes
+mascara_snake = np.zeros_like(imagen_segmentacion, dtype=np.uint8)
+
+# Convertir los puntos del contorno a coordenadas (x, y)
+puntos_contorno = np.column_stack((
+    contorno_final[:, 1],
+    contorno_final[:, 0]
+))
+
+puntos_contorno = np.round(puntos_contorno).astype(np.int32)
+
+# Rellenar el interior del contorno
+cv2.fillPoly(mascara_snake, [puntos_contorno], 255)
+
+
+# Comparar contorno inicial y final
+fig, ax = plt.subplots(1, 2, figsize=(9, 4))
+
+ax[0].imshow(imagen_segmentacion, cmap="gray")
+ax[0].plot(
+    contorno_inicial[:, 1],
+    contorno_inicial[:, 0],
+    "r--",
+    linewidth=1.5
+)
+ax[0].set_title("Contorno inicial")
+
+ax[1].imshow(imagen_segmentacion, cmap="gray")
+ax[1].plot(
+    contorno_final[:, 1],
+    contorno_final[:, 0],
+    "g-",
+    linewidth=1.5
+)
+ax[1].set_title("Contorno final - Snake")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# 2.1.4 Watershed
+
+# Calcular el gradiente de la ROI
+gradiente = sobel(region_normalizada)
+
+# Crear matriz de marcadores
+marcadores = np.zeros(imagen_segmentacion.shape, dtype=np.int32)
+
+# Coordenadas de todos los pixeles
+Y, X = np.ogrid[:alto_roi, :ancho_roi]
+
+# Distancia de cada pixel al centro de la pupila
+distancia_centro = np.sqrt(
+    (X - centro_x)**2 + (Y - centro_y)**2
+)
+
+# Marcador 1: region interna de la pupila
+marcadores[distancia_centro <= 0.35 * radio] = 1
+
+# Marcador 2: region exterior de la pupila
+marcadores[distancia_centro >= 1.6 * radio] = 2
+
+# Los pixeles que quedan en 0 no tienen clase inicial
+
+# Aplicar Watershed utilizando el gradiente y los marcadores
+etiquetas_watershed = watershed(
+    gradiente,
+    markers=marcadores,
+    watershed_line=True
+)
+
+# Seleccionar la region correspondiente a la pupila
+mascara_watershed = (
+    etiquetas_watershed == 1
+).astype(np.uint8) * 255
+
+
+# Mostrar marcadores y resultado
+fig, ax = plt.subplots(1, 3, figsize=(11, 3))
+
+ax[0].imshow(imagen_segmentacion, cmap="gray", vmin=0, vmax=255)
+ax[0].set_title("ROI original")
+
+ax[1].imshow(marcadores, cmap="viridis", vmin=0, vmax=2)
+ax[1].set_title("Marcadores")
+
+ax[2].imshow(mascara_watershed, cmap="gray", vmin=0, vmax=255)
+ax[2].set_title("Mascara Watershed")
+
+for a in ax:
+    a.axis("off")
+
+plt.tight_layout()
+plt.show()
+
+
+# Comparacion general de los cuatro metodos
+
+imagenes_segmentacion = [
+    imagen_segmentacion,
+    mascara_otsu,
+    mascara_kmeans,
+    mascara_snake,
+    mascara_watershed
+]
+
+titulos_segmentacion = [
+    "ROI original",
+    "Otsu",
+    "K-Means (K=3)",
+    "Snakes",
+    "Watershed"
+]
+
+fig, ax = plt.subplots(1, 5, figsize=(14, 3))
+
+for i in range(5):
+    ax[i].imshow(
+        imagenes_segmentacion[i],
+        cmap="gray",
+        vmin=0,
+        vmax=255
+    )
+    ax[i].set_title(titulos_segmentacion[i])
+    ax[i].axis("off")
+
+plt.tight_layout()
+plt.show()
+
+

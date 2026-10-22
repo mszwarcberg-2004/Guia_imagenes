@@ -193,7 +193,16 @@ En conjunto, los resultados muestran que **no siempre es conveniente aplicar un 
 
 ## Módulo 2. Segmentación y morfología matemática
 
-**Observaciones:** Pendiente.
+### 2.1 Segmentación de la pupila — ROI original
+
+Se aplicaron los métodos Otsu, K-Means, Snakes y Watershed sobre la ROI original en escala de grises, sin filtrado adicional.
+
+- **Otsu:** calculó un umbral de 62 y permitió identificar la región oscura correspondiente a la pupila. Sin embargo, también segmentó otras zonas oscuras de la ROI y dejó pequeños agujeros asociados a los reflejos.
+- **K-Means:** se evaluaron valores de K entre 2 y 5. Al aumentar K, disminuyeron las regiones seleccionadas fuera de la pupila. Las máscaras con K=3, K=4 y K=5 resultaron similares, aunque conservaron pequeñas imperfecciones.
+- **Snakes:** el contorno inicial se ubicó alrededor de la pupila, pero durante la evolución se contrajo hacia el reflejo luminoso, por lo que no logró delimitar correctamente el borde pupilar.
+- **Watershed:** permitió obtener una máscara compacta de la pupila mediante marcadores internos y externos. Sin embargo, el contorno obtenido no coincidió completamente con el borde observado en la imagen.
+
+**Conclusión:** K-Means y Watershed presentaron los resultados más prometedores. Se propone repetir la segmentación sobre la ROI procesada con CLAHE para evaluar si la mejora del contraste local favorece la delimitación de la pupila.
 
 ## Módulo 3. Extracción de características y dinámica temporal
 
