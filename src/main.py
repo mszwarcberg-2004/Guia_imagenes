@@ -15,7 +15,7 @@ video = cv2.VideoCapture(str(VIDEO_PATH))
 
 #Si el video no se puede abrir, tira error
 if not video.isOpened():
-    raise ValueEror("No se pudo abrir el <video")
+    raise ValueError("No se pudo abrir el <video")
 
 #1.1.1
 
