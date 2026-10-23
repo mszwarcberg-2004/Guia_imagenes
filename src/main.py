@@ -1,17 +1,20 @@
 #Imports
 from pathlib import Path
 import cv2 #cv2: librería que permite abrir videos, extraer frames y procesar imagenes.
-import matplotlib.pyplot as plt
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
-from skimage.segmentation import active_contour
-from skimage.filters import gaussian
+from skimage.morphology import skeletonize
 from funciones_modulo1 import *
+from funciones_modulo2 import *
+from visualizacion import *
+
 #Módulo 1:  
 
-# Ruta del video
+# Ruta del video, ROI y la carpeta de imagenes
 CARPETA_PROYECTO =CARPETA_PROYECTO = Path.cwd()
 VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video1.mov"
+ROI_PATH = CARPETA_PROYECTO / "imagenes" / "roi.png"
+CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
 
 # Abrir el video
 with VideoReader(str(VIDEO_PATH)) as video:
@@ -25,18 +28,16 @@ frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 # Mostrar el frame
 mostrar_figura((8,6),"Frame representativo del video",frame_rgb)
 
-# Ruta donde se guarda la ROI
-ROI_PATH = CARPETA_PROYECTO / "imagenes" / "roi.png"
+# Crear carpeta IMAGENES, donde vamos a guardar el frame y el roi
+CARPETA_IMAGENES.mkdir(exist_ok=True)
 
 # Verificar si ya existe una ROI guardada
 if ROI_PATH.exists():
-
     # Si existe, cargarla directamente
     roi = cv2.imread(str(ROI_PATH))
     print("Se cargo la ROI guardada")
 
 else:
-
     # Si no existe, seleccionar una nueva ROI
     x, y, w, h = cv2.selectROI("Seleccionar ROI", frame, False)
     cv2.destroyAllWindows()
@@ -49,10 +50,6 @@ else:
     # Guardar la ROI seleccionada como png en mi compu
     cv2.imwrite(str(ROI_PATH), roi)
 
-# Crear carpeta IMAGENES, donde vamos a guardar el frame y el roi
-CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
-CARPETA_IMAGENES.mkdir(exist_ok=True)
-
 # Guardar frame completo como png en mi compu
 cv2.imwrite(str(CARPETA_IMAGENES / "frame.png"), frame)
 
@@ -61,47 +58,20 @@ roi_rgb = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
 mostrar_figura((6,6),"Region de interes (ROI)",roi_rgb)
 
 # 1.1.2 Dimensiones y profundidad de bits
-
 alto, ancho, canales = roi.shape
 
 # Cantidad de bits por canal
 bits = roi.dtype.itemsize * 8
-
-print("Dimensiones de la ROI:")
-print(f"Ancho: {ancho} pixeles")
-print(f"Alto: {alto} pixeles")
-print(f"Cantidad de canales: {canales}")
-print(f"Profundidad de bits por canal: {bits}")
-print(f"Profundidad total por pixel: {bits * canales} bits")
+print(f"Dimensiones de la ROI:\nAncho: {ancho} pixeles\nAlto: {alto} pixeles\nCantidad de canales: {canales}\nProfundidad de bits por canal: {bits}\nProfundidad total por pixel: {bits * canales} bits")
 
 # 1.1.3 Resolucion espacial: submuestreo
-
 escalas = [0.50, 0.25, 0.05]
 
-plt.figure(figsize=(12, 8))
+reducidas = [submuestrear(roi_rgb, e) for e in escalas]
+imagenes = [roi_rgb] + reducidas
+titulos = ["ROI original (100%)"] + [f"Resolucion {int(e * 100)}% ({img.shape[1]}x{img.shape[0]})" for e, img in zip(escalas, reducidas)]
 
-plt.subplot(2, 2, 1)
-plt.imshow(roi_rgb)
-plt.title("ROI original (100%)")
-plt.axis("off")
-
-for i, escala in enumerate(escalas):
-    nuevo_ancho = max(1, round(ancho * escala))
-    nuevo_alto = max(1, round(alto * escala))
-
-    roi_reducida = cv2.resize(
-        roi_rgb,
-        (nuevo_ancho, nuevo_alto),
-        interpolation=cv2.INTER_AREA
-    )
-
-    plt.subplot(2, 2, i + 2)
-    plt.imshow(roi_reducida, interpolation="nearest")
-    plt.title(f"Resolucion {int(escala * 100)}% ({nuevo_ancho}x{nuevo_alto})")
-    plt.axis("off")
-
-plt.tight_layout()
-plt.show()
+mostrar_imagenes(imagenes, titulos, filas=2, figsize=(12, 8), interpolation="nearest")
 
 # 1.1.4 Cuantizacion (profundidad de bits)
 
@@ -131,25 +101,7 @@ roi_hsv = cv2.cvtColor(roi_rgb, cv2.COLOR_RGB2HSV)
 H, S, V = cv2.split(roi_hsv)
 
 # Visualizar cada componente en escala de grises
-plt.figure(figsize=(12, 4))
-
-plt.subplot(1, 3, 1)
-plt.imshow(H, cmap="gray", vmin=0, vmax=179)
-plt.title("H - Matiz")
-plt.axis("off")
-
-plt.subplot(1, 3, 2)
-plt.imshow(S, cmap="gray", vmin=0, vmax=255)
-plt.title("S - Saturacion")
-plt.axis("off")
-
-plt.subplot(1, 3, 3)
-plt.imshow(V, cmap="gray", vmin=0, vmax=255)
-plt.title("V - Valor")
-plt.axis("off")
-
-plt.tight_layout()
-plt.show()
+mostrar_imagenes([H, S, V], ["H - Matiz", "S - Saturacion", "V - Valor"], figsize=(12, 4), vmin=0, vmax=[179, 255, 255])
 
 #1.2.1 
 
@@ -173,6 +125,7 @@ titulos = ["Histograma original", "Brillo +50", "Contraste x1.5"]
 mostrar_histogramas(imagenes,titulos,log=True, figsize=(12, 4))
 
 # 1.2.2 Escalado por rango de interes
+
 # Convertir la ROI a escala de grises
 roi_gris = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
 #aplicamos funcion escalar por rango
@@ -209,14 +162,9 @@ mostrar_histogramas(imagenes,titulos,figsize=(16,4))
 
 # A. Aplicacion de filtros sobre la ROI original (sin ruido simulado)
 
-# Filtro de media
-roi_media = cv2.blur(roi_gris, (3, 3))
-
-# Filtro de mediana
-roi_mediana = cv2.medianBlur(roi_gris, 3)
-
-# Filtro gaussiano
-roi_filtro_gaussiano = cv2.GaussianBlur(roi_gris, (3, 3), 0)
+roi_media = cv2.blur(roi_gris, (3, 3)) # Filtro de media
+roi_mediana = cv2.medianBlur(roi_gris, 3) # Filtro de mediana
+roi_filtro_gaussiano = cv2.GaussianBlur(roi_gris, (3, 3), 0) # Filtro gaussiano
 
 # Comparar la imagen original con las tres filtradas
 imagenes = [roi_gris, roi_media, roi_mediana, roi_filtro_gaussiano]
@@ -228,10 +176,10 @@ mostrar_imagenes(imagenes,titulos,vmin=0,vmax=255,figsize=(16, 4))
 
 # Creamos un generador de numeros aleatorios
 rng = np.random.default_rng(42)
-#Agregamos el ruido usando funciones en el módulo 
-roi_gaussiana = agregar_ruido_gaussiano(roi_gris,rng)
-roi_sal_pimienta = agregar_sal_pimienta(roi_gris,rng)
-roi_speckle = agregar_speckle(roi_gris, rng)
+#Agregamos el ruido usando funciones en el modulo
+roi_gaussiana = agregar_ruido_gaussiano(roi_gris,rng) #Ruido gaussiano
+roi_sal_pimienta = agregar_sal_pimienta(roi_gris,rng) #Ruido sal pimienta
+roi_speckle = agregar_speckle(roi_gris, rng) #Ruido speckle
 
 # Comparacion de los ruidos
 imagenes_ruido = [roi_gris, roi_gaussiana, roi_sal_pimienta, roi_speckle]
@@ -241,14 +189,9 @@ mostrar_imagenes(imagenes_ruido,titulos_ruido,vmin=0,vmax=255, figsize=(16, 4))
 
 # C. Aplicacion de filtros espaciales
 
-# Aplicar filtro gaussiano al ruido gaussiano
-roi_gaussiana_filtrada = cv2.GaussianBlur(roi_gaussiana, (3, 3), 0)
-
-# Aplicar filtro de mediana al ruido sal y pimienta
-roi_sal_pimienta_filtrada = cv2.medianBlur(roi_sal_pimienta, 3)
-
-# Aplicar filtro de media al ruido speckle
-roi_speckle_filtrada = cv2.blur(roi_speckle, (3, 3))
+roi_gaussiana_filtrada = cv2.GaussianBlur(roi_gaussiana, (3, 3), 0) # Filtro gaussiano al ruido gaussiano
+roi_sal_pimienta_filtrada = cv2.medianBlur(roi_sal_pimienta, 3) # Filtro de mediana al ruido de sal pimienta
+roi_speckle_filtrada = cv2.blur(roi_speckle, (3, 3)) # Filtro de media al ruido speckle
 
 # Comparar imagenes antes y despues del filtrado
 imagenes = [roi_gaussiana, roi_gaussiana_filtrada, roi_sal_pimienta, roi_sal_pimienta_filtrada, roi_speckle, roi_speckle_filtrada]
@@ -268,8 +211,7 @@ imagen_filtrada = roi_filtro_gaussiano
 bordes_original = detectar_bordes(imagen_original)
 bordes_filtrada = detectar_bordes(imagen_filtrada)
 
-nombres = ["Roberts", "Sobel", "Prewitt",
-           "Laplaciano", "Canny"]
+nombres = ["Roberts", "Sobel", "Prewitt", "Laplaciano", "Canny"]
 
 # Usamos la misma escala por operador para comparar original y filtrada
 limites = [max(np.max(orig), np.max(filt), 1) for orig, filt in zip(bordes_original, bordes_filtrada)]
@@ -325,34 +267,20 @@ recon_fase = np.fft.ifft2(
 # C. Cruzar magnitud y fase de dos imagenes
 
 # Fourier de la ROI filtrada con gaussiano
-F_gaussiana = np.fft.fftshift(
-    np.fft.fft2(roi_filtro_gaussiano)
-)
+F_gaussiana = np.fft.fftshift(np.fft.fft2(roi_filtro_gaussiano))
 
 magnitud_gaussiana = np.abs(F_gaussiana)
 fase_gaussiana = np.angle(F_gaussiana)
 
 # Magnitud original + fase gaussiana
-F_cruzada_1 = magnitud_original * np.exp(
-    1j * fase_gaussiana
-)
-
-recon_cruzada_1 = np.fft.ifft2(
-    np.fft.ifftshift(F_cruzada_1)
-).real
+F_cruzada_1 = magnitud_original * np.exp(1j * fase_gaussiana)
+recon_cruzada_1 = np.fft.ifft2(np.fft.ifftshift(F_cruzada_1)).real
 
 # Magnitud gaussiana + fase original
-F_cruzada_2 = magnitud_gaussiana * np.exp(
-    1j * fase_original
-)
-
-recon_cruzada_2 = np.fft.ifft2(
-    np.fft.ifftshift(F_cruzada_2)
-).real
-
+F_cruzada_2 = magnitud_gaussiana * np.exp(1j * fase_original)
+recon_cruzada_2 = np.fft.ifft2(np.fft.ifftshift(F_cruzada_2)).real
 
 # D. Visualizacion comparativa
-
 imagenes = [roi_gris, recon_magnitud, recon_fase, recon_cruzada_1, recon_cruzada_2]
 
 imagenes=[normalizar_imagen(img) for img in imagenes]
@@ -363,13 +291,8 @@ mostrar_imagenes(imagenes, titulos, figsize=(18, 4))
 # 1.3.3 Densidad espectral de potencia (PSD)
 
 # Calcular la transformada de Fourier de la ROI original y filtrada
-F_original_psd = np.fft.fftshift(
-    np.fft.fft2(roi_gris.astype(float))
-)
-
-F_gaussiana_psd = np.fft.fftshift(
-    np.fft.fft2(roi_filtro_gaussiano.astype(float))
-)
+F_original_psd = np.fft.fftshift(np.fft.fft2(roi_gris.astype(float)))
+F_gaussiana_psd = np.fft.fftshift(np.fft.fft2(roi_filtro_gaussiano.astype(float)))
 
 # Calcular la PSD como el cuadrado de la magnitud
 psd_original = np.abs(F_original_psd)**2
@@ -391,9 +314,8 @@ frame_pasabajos, frame_pasaaltos, H_pasabajos, H_pasaaltos = filtrar_frecuencial
 
 # Aplicar filtro gaussiano en el dominio espacial
 # para comparar ambos tipos de filtrado
-frame_gaussiano = cv2.GaussianBlur(
-    frame_gris, (5, 5), 0
-)
+frame_gaussiano = cv2.GaussianBlur(frame_gris, (5, 5), 0)
+
 # Visualizar las imagenes
 titulos = ["Frame original", "Pasa-bajos frecuencial", "Pasa-altos frecuencial", "Gaussiano espacial"]
 imagenes = [frame_gris, frame_pasabajos, frame_pasaaltos, frame_gaussiano]
@@ -419,21 +341,12 @@ imagenes_filtradas = {"Media": roi_media, "Mediana": roi_mediana, "Gaussiano": r
 print("\n--- Comparacion PSNR y SSIM ---")
 
 for nombre, imagen in imagenes_filtradas.items():
-
     # PSNR: compara las diferencias de intensidad
     psnr_valor = cv2.PSNR(imagen_referencia, imagen)
 
     # SSIM: compara la similitud estructural
-    ssim_valor = ssim(
-        imagen_referencia,
-        imagen,
-        data_range=255
-    )
-
-    print(f"\nFiltro: {nombre}")
-    print(f"PSNR: {psnr_valor:.2f} dB")
-    print(f"SSIM: {ssim_valor:.4f}")
-
+    ssim_valor = ssim(imagen_referencia, imagen, data_range=255 )
+    print(f"\nFiltro: {nombre}\nPSNR: {psnr_valor:.2f} dB\nSSIM: {ssim_valor:.4f}")
 
 # MODULO 2: Segmentacion y morfologia matematica de la pupila
 
@@ -449,360 +362,60 @@ print(f"Umbral calculado por Otsu: {umbral}")
 # Visualizar la ROI y la mascara obtenida
 mostrar_imagenes([imagen_otsu, mascara_otsu], ["ROI original", "Segmentacion mediante Otsu"], figsize=(10, 4), vmin=[None, 0], vmax=[None, 255])
 
+
 # 2.1.2 Segmentacion mediante K-Means
 # Trabajamos con la ROI original en escala de grises
 imagen_kmeans = roi_gris
 
-# Convertir la imagen en una lista de pixeles
-pixeles = imagen_kmeans.reshape(-1, 1).astype(np.float32)
-
-# Criterio de finalizacion del algoritmo
-criterio = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 100, 0.2)
-
 # Guardar las mascaras para compararlas despues
 mascaras_kmeans = {}
+imagenes_agrupadas = []
+mascaras_oscuras = []
 
-fig, ax = plt.subplots(2, 4, figsize=(14, 7))
+valores_k = [2, 3, 4, 5]
 
-for i, k in enumerate([2, 3, 4, 5]):
+for k in valores_k:
 
-    # Aplicar K-Means
-    _, etiquetas, centros = cv2.kmeans(
-        pixeles,
-        k,
-        None,
-        criterio,
-        10,
-        cv2.KMEANS_PP_CENTERS
-    )
-
-    # Reconstruir la imagen agrupada
-    centros_uint8 = np.uint8(centros)
-
-    imagen_agrupada = centros_uint8[
-        etiquetas.flatten()
-    ].reshape(imagen_kmeans.shape)
-
-    # Identificar el grupo de menor intensidad
-    grupo_oscuro = np.argmin(centros.flatten())
-
-    # Crear mascara binaria
-    mascara = (
-        etiquetas.flatten() == grupo_oscuro
-    ).reshape(imagen_kmeans.shape).astype(np.uint8) * 255
+    # Aplicar K-Means con la funcion del modulo
+    imagen_agrupada, mascara, centros = segmentar_kmeans(imagen_kmeans, k)
 
     mascaras_kmeans[k] = mascara
-
-    # Visualizar imagen agrupada
-    ax[0, i].imshow(
-        imagen_agrupada, cmap="gray",
-        vmin=0, vmax=255
-    )
-    ax[0, i].set_title(f"K-Means K={k}")
-
-    # Visualizar mascara del grupo mas oscuro
-    ax[1, i].imshow(
-        mascara, cmap="gray",
-        vmin=0, vmax=255
-    )
-    ax[1, i].set_title(f"Grupo mas oscuro K={k}")
+    imagenes_agrupadas.append(imagen_agrupada)
+    mascaras_oscuras.append(mascara)
 
     print(f"K={k}: centros = {np.sort(centros.flatten())}")
 
-for fila in ax:
-    for a in fila:
-        a.axis("off")
+# Visualizar imagen agrupada (fila 1) y mascara del grupo mas oscuro (fila 2)
+titulos_kmeans = (
+    [f"K-Means K={k}" for k in valores_k]
+    + [f"Grupo mas oscuro K={k}" for k in valores_k]
+)
 
-plt.tight_layout()
-plt.show()
-
-
+mostrar_imagenes(imagenes_agrupadas + mascaras_oscuras,titulos_kmeans,filas=2,figsize=(14, 7),vmin=0,vmax=255)
 
 # 2.1.3 Segmentacion mediante contornos activos (Snakes)
 
-# Imagen de trabajo en escala de grises
-imagen_snake = roi_gris.astype(float) / 255.0
-
-# Suavizar para reducir pequenas variaciones
-imagen_snake_suavizada = gaussian(
-    imagen_snake, sigma=1
-)
-
-# Dimensiones de la ROI
-alto, ancho = roi_gris.shape
-
-# Definir contorno inicial circular
-centro_x = ancho / 2
-centro_y = alto / 2
-
-radio_inicial = min(alto, ancho) * 0.35
-
-# Crear puntos del circulo
-angulo = np.linspace(0, 2*np.pi, 120, endpoint=False)
-
-# Coordenadas en formato fila, columna
-contorno_inicial = np.array([
-    centro_y + radio_inicial * np.sin(angulo),
-    centro_x + radio_inicial * np.cos(angulo)
-]).T
-
-# Aplicar contorno activo
-contorno_final = active_contour(
-    imagen_snake_suavizada,
-    contorno_inicial,
-    alpha=0.015,
-    beta=10,
-    gamma=0.001,
-    w_line=0,
-    w_edge=1,
-    max_num_iter=2500,
-    boundary_condition="periodic"
-)
-
-# Crear mascara binaria a partir del contorno final
-mascara_snake = np.zeros_like(roi_gris, dtype=np.uint8)
-
-# OpenCV utiliza coordenadas columna, fila
-puntos_snake = np.round(
-    contorno_final[:, ::-1]
-).astype(np.int32)
-
-cv2.fillPoly(
-    mascara_snake,
-    [puntos_snake],
-    255
-)
+# Aplicar contorno activo con la funcion del modulo
+mascara_snake, contorno_inicial, contorno_final = segmentar_snake(roi_gris)
 
 # Visualizar el contorno inicial y final
-fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-
-ax[0].imshow(roi_gris, cmap="gray")
-ax[0].plot(
-    contorno_inicial[:, 1],
-    contorno_inicial[:, 0],
-    "--r",
-    label="Contorno inicial"
-)
-ax[0].plot(
-    contorno_final[:, 1],
-    contorno_final[:, 0],
-    "-g",
-    label="Contorno final"
-)
-ax[0].set_title("Segmentacion con Snakes")
-ax[0].legend()
-
-ax[1].imshow(
-    mascara_snake,
-    cmap="gray",
-    vmin=0, vmax=255
-)
-ax[1].set_title("Mascara obtenida con Snakes")
-
-for a in ax:
-    a.axis("off")
-
-plt.tight_layout()
-plt.show()
-
+mostrar_snake(roi_gris, mascara_snake, contorno_inicial, contorno_final)
 
 # 2.1.4 Segmentacion mediante Watershed
 
-# Imagen de trabajo
-imagen_ws = roi_gris.copy()
-
-# Suavizado gaussiano para reducir variaciones locales
-imagen_ws_filtrada = cv2.GaussianBlur(
-    imagen_ws, (3, 3), 0
-)
-
-# Utilizar la mascara de Otsu para definir regiones iniciales
-binaria = (mascara_otsu > 0).astype(np.uint8)
-
-# Componentes conectadas para identificar la pupila
-cantidad, etiquetas, estadisticas, centroides = (
-    cv2.connectedComponentsWithStats(binaria, 8)
-)
-
-alto_ws, ancho_ws = imagen_ws.shape
-centro_roi = np.array([ancho_ws / 2, alto_ws / 2])
-
-# Elegir la componente mas cercana al centro de la ROI
-componentes = list(range(1, cantidad))
-
-componente_pupila = min(
-    componentes,
-    key=lambda i: np.linalg.norm(
-        centroides[i] - centro_roi
-    )
-)
-
-# Mascara aproximada de la pupila
-mascara_inicial = (
-    etiquetas == componente_pupila
-).astype(np.uint8)
-
-# Limpiar pequenas irregularidades
-kernel_ws = np.ones((3, 3), np.uint8)
-
-mascara_inicial = cv2.morphologyEx(
-    mascara_inicial,
-    cv2.MORPH_CLOSE,
-    kernel_ws
-)
-
-# Crear marcadores para Watershed
-# 0 = zona desconocida
-# 1 = fondo
-# 2 = pupila
-
-marcadores = np.zeros_like(
-    imagen_ws, dtype=np.int32
-)
-
-# Definir fondo seguro mediante dilatacion
-region_dilatada = cv2.dilate(
-    mascara_inicial, kernel_ws, iterations=3
-)
-
-marcadores[region_dilatada == 0] = 1
-
-# Definir pupila segura mediante erosion
-pupila_segura = cv2.erode(
-    mascara_inicial, kernel_ws, iterations=2
-)
-
-marcadores[pupila_segura == 1] = 2
-
-# Convertir la imagen a BGR para cv2.watershed
-imagen_ws_bgr = cv2.cvtColor(
-    imagen_ws_filtrada, cv2.COLOR_GRAY2BGR
-)
-
-# Aplicar Watershed
-marcadores_resultado = cv2.watershed(
-    imagen_ws_bgr, marcadores.copy()
-)
-
-# Obtener mascara final de la pupila
-mascara_watershed = (
-    marcadores_resultado == 2
-).astype(np.uint8) * 255
+# Aplicar Watershed con la funcion del modulo
+mascara_inicial, mascara_watershed = segmentar_watershed(roi_gris, mascara_otsu)
 
 # Visualizar resultados
-fig, ax = plt.subplots(1, 3, figsize=(13, 4))
-
-ax[0].imshow(imagen_ws, cmap="gray")
-ax[0].set_title("ROI original")
-
-ax[1].imshow(
-    mascara_inicial, cmap="gray",
-    vmin=0, vmax=1
-)
-ax[1].set_title("Mascara inicial")
-
-ax[2].imshow(
-    mascara_watershed, cmap="gray",
-    vmin=0, vmax=255
-)
-ax[2].set_title("Mascara Watershed")
-
-for a in ax:
-    a.axis("off")
-
-plt.tight_layout()
-plt.show()
-
+mostrar_imagenes([roi_gris, mascara_inicial, mascara_watershed], ["ROI original", "Mascara inicial", "Mascara Watershed"], figsize=(13, 4), vmin=[None, 0, 0], vmax=[None, 1, 255])
 
 # 2.1.5 Comparacion de los metodos mediante Dice
 
 # A. Crear o cargar la mascara de referencia manual
-
 REFERENCIA_PATH = CARPETA_PROYECTO / "imagenes" / "mascara_referencia.png"
+mascara_referencia = cargar_o_crear_referencia(REFERENCIA_PATH, roi_gris)
 
-if REFERENCIA_PATH.exists():
-
-    mascara_referencia = cv2.imread(
-        str(REFERENCIA_PATH),
-        cv2.IMREAD_GRAYSCALE
-    )
-
-    if mascara_referencia.shape != roi_gris.shape:
-        raise ValueError(
-            "La mascara de referencia no tiene las dimensiones de la ROI"
-        )
-
-    print("Se cargo la mascara de referencia guardada")
-
-else:
-
-    # Mostrar la ROI para marcar manualmente la pupila
-    fig, ax = plt.subplots(figsize=(7, 6))
-
-    ax.imshow(roi_gris, cmap="gray", vmin=0, vmax=255)
-    ax.set_title(
-        "Marcar puntos alrededor del contorno pupilar\n"
-        "Presionar Enter para finalizar"
-    )
-
-    print("Hace clic alrededor del borde real de la pupila.")
-    print("Presiona Enter cuando termines.")
-
-    puntos = plt.ginput(n=-1, timeout=0)
-    plt.close(fig)
-
-    if len(puntos) < 3:
-        raise ValueError(
-            "Se necesitan al menos 3 puntos para definir el contorno"
-        )
-
-    # Convertir los puntos seleccionados a coordenadas de pixeles
-    puntos = np.round(puntos).astype(np.int32)
-
-    # Crear mascara binaria manual
-    mascara_referencia = np.zeros_like(
-        roi_gris, dtype=np.uint8
-    )
-
-    cv2.fillPoly(
-        mascara_referencia,
-        [puntos],
-        255
-    )
-
-    # Guardar para reutilizar la misma referencia
-    REFERENCIA_PATH.parent.mkdir(
-        parents=True, exist_ok=True
-    )
-
-    cv2.imwrite(
-        str(REFERENCIA_PATH),
-        mascara_referencia
-    )
-
-
-# B. Funcion para calcular Dice
-
-def calcular_dice(mascara1, mascara2):
-
-    # Convertir ambas mascaras a booleanas
-    m1 = mascara1 > 0
-    m2 = mascara2 > 0
-
-    interseccion = np.logical_and(m1, m2).sum()
-
-    total = m1.sum() + m2.sum()
-
-    if total == 0:
-        return 1.0
-
-    dice = 2 * interseccion / total
-
-    return dice
-
-
-# C. Comparar los cuatro metodos
-
+# B. Comparar los cuatro metodos
 mascaras_segmentacion = {
     "Otsu": mascara_otsu,
     "K-Means K=2": mascaras_kmeans[2],
@@ -828,48 +441,15 @@ for nombre, mascara in mascaras_segmentacion.items():
 
     print(f"{nombre}: Dice = {valor_dice:.4f}")
 
-
-# D. Identificar el metodo con mayor Dice
-
-mejor_metodo = max(
-    resultados_dice,
-    key=resultados_dice.get
-)
-
+# C. Identificar el metodo con mayor Dice
+mejor_metodo = max(resultados_dice, key=resultados_dice.get)
 mejor_mascara = mascaras_segmentacion[mejor_metodo].copy()
 
-print(f"\nMejor metodo: {mejor_metodo}")
-print(f"Dice obtenido: {resultados_dice[mejor_metodo]:.4f}")
+print(f"\nMejor metodo: {mejor_metodo}\nDice obtenido: {resultados_dice[mejor_metodo]:.4f}")
 
+# D. Visualizar la referencia y el mejor resultado
 
-# E. Visualizar la referencia y el mejor resultado
-
-fig, ax = plt.subplots(1, 3, figsize=(12, 4))
-
-ax[0].imshow(roi_gris, cmap="gray")
-ax[0].set_title("ROI original")
-
-ax[1].imshow(
-    mascara_referencia,
-    cmap="gray",
-    vmin=0, vmax=255
-)
-ax[1].set_title("Referencia manual")
-
-ax[2].imshow(
-    mejor_mascara,
-    cmap="gray",
-    vmin=0, vmax=255
-)
-ax[2].set_title(f"Mejor metodo: {mejor_metodo}")
-
-for a in ax:
-    a.axis("off")
-
-plt.tight_layout()
-plt.show()
-
-
+mostrar_imagenes([roi_gris, mascara_referencia, mejor_mascara], ["ROI original", "Referencia manual", f"Mejor metodo: {mejor_metodo}"], figsize=(12, 4), vmin=[None, 0, 0], vmax=[None, 255, 255])
 
 # 2.2.1 Operaciones morfologicas
 
@@ -878,71 +458,13 @@ mascara_base = mejor_mascara.copy()
 
 print(f"Metodo seleccionado para morfologia: {mejor_metodo}")
 
-# Elemento estructurante eliptico de 3x3
-kernel_morf = cv2.getStructuringElement(
-    cv2.MORPH_ELLIPSE, (3, 3)
-)
-
-# Erosion: reduce las regiones blancas
-mascara_erosion = cv2.erode(
-    mascara_base, kernel_morf, iterations=1
-)
-
-# Dilatacion: expande las regiones blancas
-mascara_dilatacion = cv2.dilate(
-    mascara_base, kernel_morf, iterations=1
-)
-
-# Apertura: erosion seguida de dilatacion
-mascara_apertura = cv2.morphologyEx(
-    mascara_base,
-    cv2.MORPH_OPEN,
-    kernel_morf
-)
-
-# Cierre: dilatacion seguida de erosion
-mascara_cierre = cv2.morphologyEx(
-    mascara_base,
-    cv2.MORPH_CLOSE,
-    kernel_morf
-)
+# Erosion, dilatacion, apertura y cierre con la funcion del modulo
+mascaras_morfologicas = aplicar_morfologia(mascara_base)
 
 # Comparacion visual
-imagenes_morf = [
-    mascara_base,
-    mascara_erosion,
-    mascara_dilatacion,
-    mascara_apertura,
-    mascara_cierre
-]
-
-titulos_morf = [
-    "Mascara original",
-    "Erosion",
-    "Dilatacion",
-    "Apertura",
-    "Cierre"
-]
-
-fig, ax = plt.subplots(1, 5, figsize=(16, 4))
-
-for i in range(5):
-    ax[i].imshow(
-        imagenes_morf[i],
-        cmap="gray",
-        vmin=0,
-        vmax=255
-    )
-    ax[i].set_title(titulos_morf[i])
-    ax[i].axis("off")
-
-plt.tight_layout()
-plt.show()
-
+mostrar_imagenes(list(mascaras_morfologicas.values()), ["Mascara original", "Erosion", "Dilatacion", "Apertura", "Cierre"], figsize=(16, 4), vmin=0, vmax=255)
 
 # 2.2.2 Esqueletizacion de la pupila
-
-from skimage.morphology import skeletonize
 
 # Utilizar la mascara del mejor metodo de segmentacion
 mascara_binaria = mascara_base > 0
@@ -951,47 +473,12 @@ mascara_binaria = mascara_base > 0
 esqueleto_pupila = skeletonize(mascara_binaria)
 
 # Visualizar resultados
-fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-
-ax[0].imshow(mascara_base, cmap="gray")
-ax[0].set_title("Mascara pupilar original")
-
-ax[1].imshow(esqueleto_pupila, cmap="gray")
-ax[1].set_title("Esqueleto de la pupila")
-
-for a in ax:
-    a.axis("off")
-
-plt.tight_layout()
-plt.show()
-
-
+mostrar_imagenes([mascara_base, esqueleto_pupila], ["Mascara pupilar original", "Esqueleto de la pupila"], figsize=(10, 4))
 
 # 2.2.3 Comparacion de mascaras mediante Dice e IoU
 
-# Funcion para calcular IoU
-def calcular_iou(mascara1, mascara2):
-
-    m1 = mascara1 > 0
-    m2 = mascara2 > 0
-
-    interseccion = np.logical_and(m1, m2).sum()
-    union = np.logical_or(m1, m2).sum()
-
-    if union == 0:
-        return 1.0
-
-    return interseccion / union
-
-
-# Mascaras que vamos a comparar
-mascaras_morfologicas = {
-    "Sin morfologia": mascara_base,
-    "Erosion": mascara_erosion,
-    "Dilatacion": mascara_dilatacion,
-    "Apertura": mascara_apertura,
-    "Cierre": mascara_cierre
-}
+# Las funciones calcular_dice y calcular_iou estan en funciones_modulo2
+# Las mascaras a comparar son las de mascaras_morfologicas (2.2.1)
 
 resultados_morfologia = {}
 
@@ -1000,95 +487,27 @@ print("\n--- Comparacion de operaciones morfologicas ---")
 for nombre, mascara in mascaras_morfologicas.items():
 
     # Reutilizamos la funcion Dice del apartado 2.1
-    dice = calcular_dice(
-        mascara_referencia,
-        mascara
-    )
+    dice = calcular_dice(mascara_referencia, mascara)
+    iou = calcular_iou(mascara_referencia, mascara)
 
-    iou = calcular_iou(
-        mascara_referencia,
-        mascara
-    )
+    resultados_morfologia[nombre] = {"Dice": dice, "IoU": iou}
 
-    resultados_morfologia[nombre] = {
-        "Dice": dice,
-        "IoU": iou
-    }
-
-    print(f"\nOperacion: {nombre}")
-    print(f"Dice = {dice:.4f}")
-    print(f"IoU  = {iou:.4f}")
-
+    print(f"\nOperacion: {nombre}\nDice = {dice:.4f}\nIoU  = {iou:.4f}")
 
 # Seleccionar la mascara con mayor Dice
-mejor_operacion = max(
-    resultados_morfologia,
-    key=lambda nombre: resultados_morfologia[nombre]["Dice"]
-)
-
-mascara_final = mascaras_morfologicas[
-    mejor_operacion
-].copy()
+mejor_operacion = max(resultados_morfologia, key=lambda nombre: resultados_morfologia[nombre]["Dice"])
+mascara_final = mascaras_morfologicas[mejor_operacion].copy()
 
 print("\n--- Resultado final del Modulo 2 ---")
-print(f"Metodo de segmentacion: {mejor_metodo}")
-print(f"Operacion morfologica: {mejor_operacion}")
-print(
-    f"Dice final: "
-    f"{resultados_morfologia[mejor_operacion]['Dice']:.4f}"
-)
-print(
-    f"IoU final: "
-    f"{resultados_morfologia[mejor_operacion]['IoU']:.4f}"
-)
-
+print(f"Metodo de segmentacion: {mejor_metodo}\nOperacion morfologica: {mejor_operacion}\nDice final: {resultados_morfologia[mejor_operacion]['Dice']:.4f}\nIoU final: {resultados_morfologia[mejor_operacion]['IoU']:.4f}")
 
 # Visualizar la mascara de referencia y la final
-fig, ax = plt.subplots(1, 3, figsize=(12, 4))
-
-ax[0].imshow(roi_gris, cmap="gray")
-ax[0].set_title("ROI original")
-
-ax[1].imshow(
-    mascara_referencia,
-    cmap="gray",
-    vmin=0,
-    vmax=255
-)
-ax[1].set_title("Referencia manual")
-
-ax[2].imshow(
-    mascara_final,
-    cmap="gray",
-    vmin=0,
-    vmax=255
-)
-ax[2].set_title(
-    f"{mejor_metodo} + {mejor_operacion}"
-)
-
-for a in ax:
-    a.axis("off")
-
-plt.tight_layout()
-plt.show()
-
+mostrar_imagenes([roi_gris, mascara_referencia, mascara_final], ["ROI original", "Referencia manual", f"{mejor_metodo} + {mejor_operacion}"], figsize=(12, 4), vmin=[None, 0, 0], vmax=[None, 255, 255])
 
 # Guardar la mascara final del Modulo 2
-
 CARPETA_RESULTADOS = CARPETA_PROYECTO / "resultados"
+CARPETA_RESULTADOS.mkdir(parents=True, exist_ok=True)
+RUTA_MASCARA_FINAL = (CARPETA_RESULTADOS / "mascara_pupila_final.png")
 
-CARPETA_RESULTADOS.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-RUTA_MASCARA_FINAL = (
-    CARPETA_RESULTADOS / "mascara_pupila_final.png"
-)
-
-cv2.imwrite(
-    str(RUTA_MASCARA_FINAL),
-    mascara_final
-)
+cv2.imwrite(str(RUTA_MASCARA_FINAL), mascara_final)
 print(f"\nMascara final guardada en: {RUTA_MASCARA_FINAL}")

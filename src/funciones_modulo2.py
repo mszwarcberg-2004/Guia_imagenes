@@ -1,4 +1,9 @@
+#Este archivo contiene funciones específicas correspondientes al
+#módulo 2
+
+#Imports
 import cv2
+import matplotlib.pyplot as plt
 import numpy as np
 from skimage.filters import gaussian
 from skimage.segmentation import active_contour
@@ -99,6 +104,38 @@ def segmentar_snake(roi_gris):
 
     return mascara_snake, contorno_inicial, contorno_final
 
+# Visualizar el contorno inicial y final
+def mostrar_snake(roi_gris, mascara_snake, contorno_inicial, contorno_final):
+    fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+
+    ax[0].imshow(roi_gris, cmap="gray")
+    ax[0].plot(
+        contorno_inicial[:, 1],
+        contorno_inicial[:, 0],
+        "--r",
+        label="Contorno inicial"
+    )
+    ax[0].plot(
+        contorno_final[:, 1],
+        contorno_final[:, 0],
+        "-g",
+        label="Contorno final"
+    )
+    ax[0].set_title("Segmentacion con Snakes")
+    ax[0].legend()
+
+    ax[1].imshow(
+        mascara_snake,
+        cmap="gray",
+        vmin=0, vmax=255
+    )
+    ax[1].set_title("Mascara obtenida con Snakes")
+
+    for a in ax:
+        a.axis("off")
+
+    plt.tight_layout()
+    plt.show()
 
 # 2.1.4 Segmentacion mediante Watershed
 
@@ -186,8 +223,57 @@ def segmentar_watershed(roi_gris, mascara_otsu):
 
     return mascara_inicial, mascara_watershed
 
-
 # 2.1.5 Comparacion de los metodos mediante Dice
+
+# A. Crear o cargar la mascara de referencia manual
+def cargar_o_crear_referencia(REFERENCIA_PATH, roi_gris):
+
+    if REFERENCIA_PATH.exists():
+
+        mascara_referencia = cv2.imread(str(REFERENCIA_PATH), cv2.IMREAD_GRAYSCALE)
+
+        if mascara_referencia.shape != roi_gris.shape:
+            raise ValueError("La mascara de referencia no tiene las dimensiones de la ROI")
+
+        print("Se cargo la mascara de referencia guardada")
+
+    else:
+
+        # Mostrar la ROI para marcar manualmente la pupila
+        fig, ax = plt.subplots(figsize=(7, 6))
+
+        ax.imshow(roi_gris, cmap="gray", vmin=0, vmax=255)
+        ax.set_title(
+            "Marcar puntos alrededor del contorno pupilar\n"
+            "Presionar Enter para finalizar"
+        )
+
+        print("Hace clic alrededor del borde real de la pupila.")
+        print("Presiona Enter cuando termines.")
+
+        puntos = plt.ginput(n=-1, timeout=0)
+        plt.close(fig)
+
+        if len(puntos) < 3:
+            raise ValueError(
+                "Se necesitan al menos 3 puntos para definir el contorno"
+            )
+
+        # Convertir los puntos seleccionados a coordenadas de pixeles
+        puntos = np.round(puntos).astype(np.int32)
+
+        # Crear mascara binaria manual
+        mascara_referencia = np.zeros_like(roi_gris, dtype=np.uint8)
+
+        cv2.fillPoly(mascara_referencia, [puntos], 255)
+
+        # Guardar para reutilizar la misma referencia
+        REFERENCIA_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        cv2.imwrite(str(REFERENCIA_PATH), mascara_referencia)
+
+    return mascara_referencia
+
 
 # B. Funcion para calcular Dice
 def calcular_dice(mascara1, mascara2):
