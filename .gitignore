@@ -233,3 +233,6 @@ resultados/*
 *.avi
 
 .DS_Store
+# Validacion externa
+/resultados_externos/
+/datos/Videos_ojo/video_prueba.mp4
