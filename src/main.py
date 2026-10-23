@@ -7,10 +7,12 @@ from skimage.morphology import skeletonize
 from funciones_modulo1 import *
 from funciones_modulo2 import *
 from visualizacion import *
+from funciones_modulo3 import modulo3
+from funciones_modulo4 import analizar_imagen, comparar_diametro_jpeg
 
 #Constantes
 CARPETA_PROYECTO = Path.cwd()
-VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video1.mov"
+VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mp4"
 CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
 ROI_PATH = CARPETA_IMAGENES / "roi.png"
 REFERENCIA_PATH = CARPETA_IMAGENES / "mascara_referencia.png"
@@ -514,10 +516,48 @@ def modulo2(roi_gris):
     cv2.imwrite(str(RUTA_MASCARA_FINAL), mascara_final)
     print(f"\nMascara final guardada en: {RUTA_MASCARA_FINAL}")
 
-#Definimos rutina main
+    return mascara_final, mejor_metodo, mejor_operacion
+# Definimos rutina main
 def main():
-    frame, roi, roi_gris=modulo1()
-    modulo2(roi_gris)
+
+    # Modulo 1
+    frame, roi, roi_gris = modulo1()
+    
+    # Modulo 2
+    mascara_final, mejor_metodo, mejor_operacion = modulo2(roi_gris)
+
+    # Modulo 3
+    modulo3(
+        frame,
+        roi,
+        roi_gris,
+        mascara_final,
+        mejor_metodo,
+        mejor_operacion,
+        VIDEO_PATH,
+        CARPETA_PROYECTO
+    )
+
+      # MODULO 4: COMPRESION DE IMAGENES
+
+    print("\n========== MODULO 4 ==========")
+
+    # 4.1 y 4.2: Huffman, RLE y JPEG sobre la ROI
+    analizar_imagen(roi_gris, nombre="ROI del ojo")
+
+    # 4.1 y 4.2: Huffman, RLE y JPEG sobre la mascara pupilar
+    analizar_imagen(mascara_final, nombre="Mascara pupilar")
+
+    # 4.1 y 4.2: Huffman, RLE y JPEG sobre el frame completo
+    frame_gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    analizar_imagen(frame_gris, nombre="Frame completo")
+
+    # 4.3: Efecto de JPEG sobre el diametro pupilar
+    comparar_diametro_jpeg(roi_gris)
+
+    print("\n========== FIN MODULO 4 ==========")
+
 
 if __name__ == "__main__":
+    
     main()
