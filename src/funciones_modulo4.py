@@ -476,3 +476,71 @@ if __name__ == "__main__":
         print("Se omite su analisis de compresion.")
 
     print("\n--- FIN DEL ANALISIS DEL MODULO 4 ---")
+def estimar_diametro_jpeg(imagen):
+    """
+    Segmenta la pupila mediante Watershed + dilatacion
+    y calcula su diametro equivalente.
+    """
+    from funciones_modulo2 import segmentar_watershed
+
+    _, mascara_otsu = cv2.threshold(
+        imagen, 0, 255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+
+    _, mascara_ws = segmentar_watershed(imagen, mascara_otsu)
+
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (3, 3)
+    )
+    mascara = cv2.dilate(mascara_ws, kernel, iterations=1)
+
+    # Conservar la componente de mayor area
+    contornos, _ = cv2.findContours(
+        mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contornos:
+        return np.nan
+
+    contorno = max(contornos, key=cv2.contourArea)
+    mascara_limpia = np.zeros_like(mascara)
+    cv2.drawContours(
+        mascara_limpia, [contorno], -1, 255, cv2.FILLED
+    )
+
+    area = np.count_nonzero(mascara_limpia)
+    diametro = 2 * np.sqrt(area / np.pi)
+
+    return diametro
+
+
+def comparar_diametro_jpeg(roi_gris):
+    """Compara el diametro original con JPEG Q=50 y Q=10."""
+
+    diametro_original = estimar_diametro_jpeg(roi_gris)
+
+    print("\n--- EFECTO DE JPEG SOBRE EL DIAMETRO ---")
+    print(f"Original: {diametro_original:.2f} px")
+
+    for calidad in [50, 10]:
+
+        exito, jpeg = cv2.imencode(
+            ".jpg", roi_gris,
+            [cv2.IMWRITE_JPEG_QUALITY, calidad]
+        )
+
+        if not exito:
+            raise RuntimeError("No se pudo generar JPEG")
+
+        reconstruida = cv2.imdecode(
+            jpeg, cv2.IMREAD_GRAYSCALE
+        )
+
+        diametro = estimar_diametro_jpeg(reconstruida)
+
+        diferencia = diametro - diametro_original
+
+        print(f"\nJPEG Q={calidad}")
+        print(f"Diametro: {diametro:.2f} px")
+        print(f"Diferencia: {diferencia:+.2f} px")
