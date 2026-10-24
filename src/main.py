@@ -16,12 +16,13 @@ VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mp4"
 CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
 ROI_PATH = CARPETA_IMAGENES / "roi.png"
 REFERENCIA_PATH = CARPETA_IMAGENES / "mascara_referencia.png"
+SEGUNDO = 6 #segundo de interés del video
 #Módulo 1:  
 def modulo1():
     # Abrir el video
     with VideoReader(str(VIDEO_PATH)) as video:
         total_frames = video.total_frames
-        segundo = 6 #eligo un segundo particular de interés
+        segundo = SEGUNDO
         frame = video.get_frame_at_second(segundo) # Seleccionar un frame en un instante determinado
 
     # Convertir de BGR (en lo que trabaja opencvs) a RGB para visualizarlo
