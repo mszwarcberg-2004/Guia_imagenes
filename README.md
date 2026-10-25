@@ -78,12 +78,12 @@ con la misma información; se instala con `pip install openpyxl`.)*
 |---|---|
 | **Latencia** (s) | Tiempo entre el encendido de la luz y el inicio de la constricción |
 | **Amplitud de constricción** (px² y % del área basal) | Cuánto se reduce el área de la pupila |
-| **Velocidad de constricción** (px²/s) | Velocidad pico de reducción del área |
-| **Velocidad de redilatación** (px²/s) | Velocidad pico de recuperación, solo si el video incluye el apagado de la luz |
+| **Velocidad de constricción** (px²/s) | Velocidad media: la amplitud dividida por el tiempo entre el inicio de la constricción y el área mínima |
+| **Velocidad de redilatación** (px²/s) | Velocidad media desde el apagado de la luz: cambio de área dividido por el tiempo hasta el final de la ventana de medición (hasta 4 s). Solo si el video incluye el apagado |
 | **Estado del cálculo** | Qué tan confiables son los valores (ver abajo) |
 | *Datos del registro* | Video, método de segmentación, tipo de registro (`A`: la luz se enciende, `B`: se apaga), instantes de encendido y de apagado, área basal y mínima, frames totales y con pupila detectada |
 
-Un valor que no se pudo calcular aparece como `no calculado`. Los valores están en píxeles, sin calibrar a milímetros.
+Un valor que no se pudo calcular aparece como `no calculado`. Los valores están en píxeles, sin calibrar a milímetros. Las velocidades pico (máxima pendiente en 0,2 s) quedan en `extras/resultados/detalle/parametros_detallados_<video>.csv`.
 
 ### Hoja `Curva`
 
@@ -105,7 +105,7 @@ Una fila por frame:
 | `Constriccion: Calculada` (y `Redilatacion: Calculada` si hay apagado) | Valores completos |
 | `... (latencia < 0.1 s: revisar)` | La latencia es menor que cualquier valor fisiológico: no usarla sin revisar la curva |
 | `Parcial (amplitud comparable al ruido: sin latencia)` | Hay amplitud pero la señal es muy ruidosa para fijar el inicio; la latencia queda sin calcular |
-| `Parcial (luz no detectada...)`, `Basal insuficiente`, `Respuesta incompleta`, `Sin constriccion` | Faltan datos o no hubo una respuesta medible; revisar el video |
+| `Parcial (luz no detectada...)`, `Basal insuficiente`, `Respuesta incompleta`, `Sin constriccion`, `Sin redilatacion`, `Respuesta insuficiente` | Faltan datos o no hubo una respuesta medible; revisar el video |
 
 ---
 
@@ -180,11 +180,3 @@ resultados_externos/         salidas de probar_video_externo.py (una carpeta por
 observaciones.md             resultados y observaciones por módulo
 requirements.txt
 ```
-
-## Protocolo de grabación (Módulo 0)
-
-- Un solo ojo en primer plano, cabeza fija, unos 30 s por registro.
-- **Registro A (oscuridad a luz):** empezar con poca luz y encender o acercar la luz.
-- **Registro B (luz a oscuridad):** con la pupila contraída por luz directa, apagar o alejar la luz de golpe.
-  Evitar parpadear en ese instante.
-- 2 a 3 registros de cada tipo.

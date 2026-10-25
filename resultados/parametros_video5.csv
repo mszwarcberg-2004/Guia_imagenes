@@ -1,0 +1,2 @@
+﻿video,tipo_registro,encendido_s,apagado_s,area_basal_px2,area_minima_px2,latencia_s,amplitud_px2,amplitud_pct,vel_constriccion_px2_s,vel_redilatacion_px2_s,estado
+video5.mov,A,1.984,9.105,8805.0,3887.0,0.05,4918.0,55.9,1352.8,930.8,Constriccion: Calculada (latencia < 0.1 s: revisar) | Redilatacion: Calculada
