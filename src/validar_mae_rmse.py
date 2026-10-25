@@ -1,3 +1,12 @@
+"""Validacion manual (MAE / RMSE) del area y el diametro pupilar. Modulo 3.2.1.
+
+Uso (desde la raiz del proyecto, despues de correr src/main.py):
+    python src/validar_mae_rmse.py
+
+Muestra 6 frames del video, uno por uno. En cada uno hay que hacer clic alrededor
+del borde de la pupila y apretar ENTER. Si el ojo esta cerrado, ENTER sin marcar
+para saltear el frame. Al final imprime MAE y RMSE y guarda una tabla en resultados/.
+"""
 
 from pathlib import Path
 
@@ -9,11 +18,35 @@ import matplotlib.pyplot as plt
 
 # Rutas del proyecto
 CARPETA_PROYECTO = Path(__file__).resolve().parent.parent
+CARPETA_RESULTADOS = CARPETA_PROYECTO / "resultados"
 
-VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mp4"
-CSV_PATH = CARPETA_PROYECTO / "resultados" / "mediciones_video5.csv"
+VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mov"
 
 N_FRAMES_VALIDACION = 6
+
+
+def buscar_mediciones(video_path):
+    """Busca las mediciones frame a frame que dejo main.py para este video.
+
+    Primero en resultados/detalle/ (la mas reciente) y, si no hay, en el
+    formato anterior: resultados/mediciones_<video>.csv
+    """
+
+    en_detalle = sorted(
+        (CARPETA_RESULTADOS / "detalle").glob(
+            f"mediciones_{video_path.stem}__*.csv"
+        ),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    if en_detalle:
+        return en_detalle[0]
+
+    return CARPETA_RESULTADOS / f"mediciones_{video_path.stem}.csv"
+
+
+CSV_PATH = buscar_mediciones(VIDEO_PATH)
 
 
 def calcular_errores(manual, automatico):
@@ -83,8 +116,11 @@ def main():
 
     if not CSV_PATH.exists():
         raise FileNotFoundError(
-            f"No existe {CSV_PATH}. Ejecuta primero src/main.py"
+            f"No existen las mediciones de {VIDEO_PATH.stem} en resultados/. "
+            "Ejecuta primero src/main.py"
         )
+
+    print(f"Mediciones automaticas: {CSV_PATH.name}")
 
     # Leer mediciones automaticas del Modulo 3
     tabla = pd.read_csv(CSV_PATH)
@@ -181,10 +217,12 @@ def main():
     print(f"RMSE del diametro: {rmse_diametro:.2f} px")
 
     # Guardar resultados
-    carpeta_resultados = CARPETA_PROYECTO / "resultados"
-    ruta_salida = carpeta_resultados / "validacion_mae_rmse_video5.csv"
+    CARPETA_RESULTADOS.mkdir(exist_ok=True)
+    ruta_salida = (
+        CARPETA_RESULTADOS / f"validacion_mae_rmse_{VIDEO_PATH.stem}.csv"
+    )
 
-    comparacion.to_csv(ruta_salida, index=False)
+    comparacion.round(4).to_csv(ruta_salida, index=False)
 
     print(f"\nComparacion guardada en: {ruta_salida}")
 

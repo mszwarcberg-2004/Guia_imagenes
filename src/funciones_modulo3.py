@@ -1,9 +1,22 @@
-# Modulo 3 - Integracion del codigo de analisis de la pupila
-# Adaptado del codigo de trabajo del equipo, sin modificar modulos 1 y 2.
-# Pendiente validar experimentalmente las mediciones del video.
+# ============================================================
+# MODULO 3 - Extraccion de caracteristicas y dinamica temporal
+# ============================================================
+# Este archivo expone tres cosas:
+#
+#   modulo3(...)                  -> Modulo 3 completo para el modo "desarrollo"
+#                                    (3.1 en el frame segmentado + 3.2 en video).
+#   analizar_frame_segmentado(...)-> solo 3.1 (descriptores y textura).
+#   procesar_registros(...)       -> solo 3.2: segmenta la pupila en el video,
+#                                    mide la curva A(t)/D(t), detecta la luz,
+#                                    calcula los parametros fisiologicos y arma
+#                                    las tablas. No necesita ROI ni mascara
+#                                    manual: es lo que usa el modo "evaluacion".
+# ============================================================
 
 from pathlib import Path
 from collections import Counter
+import re
+import time
 
 import cv2
 import numpy as np
@@ -14,19 +27,2088 @@ from skimage.feature import graycoprops
 from skimage.filters import gaussian, sobel
 from skimage.segmentation import active_contour, watershed
 
+try:
+    from IPython.display import display
+except ImportError:          # fuera de notebook / sin IPython
+    display = print
 
-def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, VIDEO_PATH, CARPETA_PROYECTO):
-    """Ejecuta morfometria, texturas y seguimiento temporal del Modulo 3.
+EXTENSIONES_VIDEO = {".mov", ".mp4", ".avi", ".mkv", ".m4v"}
 
-    Los resultados del modulo 2 llegan como parametros; VIDEO_PATH se comparte
-    con el resto del proyecto para analizar el mismo video.
+# Reutiliza las mediciones ya calculadas de los otros videos (carpeta detalle)
+USAR_CACHE_OTROS = True
+
+# True: procesa tambien los otros videos de la carpeta datos/Videos_ojo (para la
+#       tabla de variabilidad entre registros). False: solo el video principal.
+PROCESAR_TODOS_LOS_VIDEOS = False
+
+# True: ademas guarda mediciones_<video>.csv, serie_procesada_<video>.csv y
+#       parametros_fisiologicos_<video>.csv con los nombres y columnas de antes,
+#       para que sigan funcionando los scripts que ya leian esos archivos.
+GUARDAR_FORMATO_ANTERIOR = False
+
+METODOS_VALIDOS = {
+    "Otsu", "K-Means K=2", "K-Means K=3", "K-Means K=4", "K-Means K=5",
+    "Snakes", "Watershed"
+}
+OPERACIONES_VALIDAS = {
+    "Sin morfologia", "Erosion", "Dilatacion", "Apertura", "Cierre"
+}
+
+
+# ------------------------------------------------------------
+# PARAMETROS DEL DETECTOR (relativos al tamano del frame / de la pupila)
+# ------------------------------------------------------------
+
+# PARAMETROS (todos relativos al tamano del frame o de la pupila,
+# no a pixeles absolutos de una imagen en particular)
+#Estos parámetros son valores que configuramos para que el algoritmo pueda encontrar y seguir la pupila automáticamente en el video.
+
+
+# Ancho al que se reduce el frame solo para localizar el centro
+ANCHO_DETECCION = 420
+
+# Zona amplia (fracciones del frame: xmin, xmax, ymin, ymax) donde se busca
+# la semilla. Es solo para arrancar: despues se usa la zona de la semilla.
+ZONA_BUSQUEDA = (0.10, 0.90, 0.15, 0.85)
+
+# Rango de radios pupilares posibles, como fraccion del ancho del frame
+RADIO_MIN_REL = 0.012
+RADIO_MAX_REL = 0.08
+
+# Puntaje minimo del detector (contraste relativo, sin unidades)
+PUNTAJE_MINIMO = 0.20
+
+# Cuanto se penaliza que el disco candidato no sea uniforme
+PESO_UNIFORMIDAD = 0.5
+
+# Frames usados para estimar la semilla
+N_MUESTRAS_SEMILLA = 15
+
+# Tamano de la zona de seguimiento alrededor de la semilla (en radios)
+FACTOR_ZONA_SEGUIMIENTO = 3.0
+
+# Rango de radios permitido respecto del radio de la semilla
+RELACION_RADIO_SEMILLA = (0.5, 1.9)
+
+# La segmentacion local se limita a un disco de este tamano (en radios)
+FACTOR_DISCO_LOCAL = 1.8
+
+# Controles de calidad
+CIRCULARIDAD_MIN = 0.55
+RELACION_AREA_MAX = 1.60          # cambio maximo de area entre frames
+DESPLAZAMIENTO_MAX_REL = 1.0      # desplazamiento maximo (en radios)
+
+# Parametros de 3.2 (fisiologicos, limpieza de la serie y artefactos)
+
+FRECUENCIA_VISUALIZACION = 10     # Hz de los frames de revision (3.2.4)
+
+# Parametros fisiologicos
+VENTANA_BASAL_S = 1.0             # ventana previa al estimulo para el area basal
+VENTANA_CONSTRICCION_S = 4.0      # maximo tras el encendido (se corta antes si hay apagado)
+VENTANA_REDILATACION_S = 4.0      # ventana tras el apagado
+BASAL_RETROCESO_S = 2.0          # el area basal se busca hasta 2 s antes del estimulo
+BASAL_MARGEN_S = 0.25            # sin contar los ultimos 0.25 s (destello / artefacto del estimulo)
+VENTANAS_BASAL_S = (0.5, 1.0, 2.0)   # area de referencia previa: se prueba la ventana corta primero
+ULTIMOS_REDILATACION_S = 0.5      # area final de redilatacion = mediana de los ultimos 0.5 s de la ventana
+DURACION_MIN_REDILATACION_S = 0.5 # la ventana tras el apagado debe durar al menos esto
+LATENCIA_MIN_FISIOLOGICA_S = 0.10 # latencias menores se marcan para revision
+AMPLITUD_MIN_SOBRE_RUIDO = 4.0    # si la amplitud es menor que 4x el ruido, no se informa latencia
+UMBRAL_ESCALON_LUZ = 0.20         # instante del estimulo = 1er cruce del 20% del escalon
+FRACCION_INICIO_CONSTRICCION = 0.05
+DURACION_SOSTENIDA_S = 0.10       # el descenso debe sostenerse este tiempo para marcar el inicio
+VENTANA_EXTREMO_S = 0.25          # suavizado para buscar minimo/maximo
+MIN_PROPORCION_VALIDA = 0.50      # proporcion minima de muestras validas en una ventana
+
+# Limpieza de la serie y artefactos
+VENTANA_FILTRO_LOCAL_S = 0.30     # filtro de mediana local
+TOLERANCIA_FILTRO_LOCAL = 0.35    # desvio relativo maximo respecto de la mediana local
+MARGEN_PARPADEO_S = 0.05          # margen descartado a cada lado de un parpadeo
+MIN_TRAMO_VALIDO_S = 0.10         # tramos validos mas cortos que esto se descartan
+MIN_DURACION_PARPADEO_S = 0.10    # tramos sin medicion >= esto se marcan como parpadeo
+MAX_DURACION_PARPADEO_S = 1.00    # si dura mas, se marca "perdida_seguimiento"
+SALTO_OCULAR_REL = 0.35           # salto de centro entre frames (en radios) = mov. ocular
+
+# ------------------------------------------------------------
+# ESTADO DEL MODULO (lo fija configurar() antes de procesar)
+# ------------------------------------------------------------
+METODO_VIDEO = None
+OPERACION_VIDEO = None
+ZONA_SEGUIMIENTO = None
+RANGO_RADIOS_SEMILLA = None
+MOSTRAR_FIGURAS = True
+CARPETA_FIGURAS = Path("resultados") / "figuras"
+CARPETA_DETALLE = Path("resultados") / "detalle"
+
+# Registro de por que se descartan frames (para diagnosticar)
+MOTIVOS_RECHAZO = Counter()
+
+
+def configurar(metodo, operacion, carpeta_resultados, mostrar_figuras=True):
+    """Fija el metodo de segmentacion, la morfologia y las carpetas de salida."""
+    global METODO_VIDEO, OPERACION_VIDEO, MOSTRAR_FIGURAS
+    global CARPETA_FIGURAS, CARPETA_DETALLE
+
+    if metodo not in METODOS_VALIDOS:
+        raise ValueError(
+            f"Metodo de segmentacion desconocido: {metodo!r}. "
+            f"Opciones: {sorted(METODOS_VALIDOS)}"
+        )
+
+    if operacion not in OPERACIONES_VALIDAS:
+        raise ValueError(
+            f"Operacion morfologica desconocida: {operacion!r}. "
+            f"Opciones: {sorted(OPERACIONES_VALIDAS)}"
+        )
+
+    METODO_VIDEO = metodo
+    OPERACION_VIDEO = operacion
+    MOSTRAR_FIGURAS = bool(mostrar_figuras)
+
+    carpeta_resultados = Path(carpeta_resultados)
+    CARPETA_FIGURAS = carpeta_resultados / "figuras"
+    CARPETA_DETALLE = carpeta_resultados / "detalle"
+
+
+
+# ------------------------------------------------------------
+# DETECCION Y SEGUIMIENTO DE LA PUPILA, PARAMETROS, GRAFICOS Y TABLAS
+# ------------------------------------------------------------
+
+def detectar_centro_pupila(gris, zona, rango_radios, n_radios=6):
     """
-    VIDEO_PATH = Path(VIDEO_PATH)
-    CARPETA_PROYECTO = Path(CARPETA_PROYECTO)
-    if not VIDEO_PATH.is_file():
-        raise FileNotFoundError(f"No se encontro el video: {VIDEO_PATH}")
-    if mascara_final is None or mascara_final.shape != roi_gris.shape:
-        raise ValueError("La mascara del Modulo 2 no coincide con la ROI")
+    Busca un disco oscuro, uniforme y rodeado de un anillo mas claro.
+
+    zona: (xmin, xmax, ymin, ymax) en pixeles del frame original.
+    rango_radios: (rmin, rmax) en pixeles del frame original.
+    """
+
+    alto_original, ancho_original = gris.shape
+
+    # Reducir la resolucion solo para localizar el centro
+    escala = min(1.0, ANCHO_DETECCION / ancho_original)
+
+    ancho = max(1, int(round(ancho_original * escala)))
+    alto = max(1, int(round(alto_original * escala)))
+
+    imagen = cv2.resize(
+        gris,
+        (ancho, alto),
+        interpolation=cv2.INTER_AREA
+    )
+
+    imagen = cv2.GaussianBlur(
+        imagen,
+        (3, 3),
+        0
+    ).astype(np.float32)
+
+    imagen_cuadrado = imagen ** 2
+
+    # Zona de busqueda en la imagen reducida
+    xmin = int(max(0, zona[0] * escala))
+    xmax = int(min(ancho, zona[1] * escala))
+
+    ymin = int(max(0, zona[2] * escala))
+    ymax = int(min(alto, zona[3] * escala))
+
+    if xmax <= xmin or ymax <= ymin:
+        return None
+
+    Y, X = np.ogrid[:alto, :ancho]
+
+    zona_busqueda = (
+        (X >= xmin) &
+        (X < xmax) &
+        (Y >= ymin) &
+        (Y < ymax)
+    )
+
+    # Radios a evaluar (en la imagen reducida)
+    rmin = max(3, int(round(rango_radios[0] * escala)))
+    rmax = max(rmin, int(round(rango_radios[1] * escala)))
+
+    radios = np.unique(
+        np.round(np.linspace(rmin, rmax, n_radios)).astype(int)
+    )
+
+    mejor = None
+    mejor_puntaje = -np.inf
+
+    for radio in radios:
+
+        # Discos y anillos de referencia
+        radio_externo = int(np.ceil(1.8 * radio))
+
+        coordenadas = np.arange(
+            -radio_externo,
+            radio_externo + 1
+        )
+
+        yy, xx = np.meshgrid(
+            coordenadas,
+            coordenadas,
+            indexing="ij"
+        )
+
+        dist = np.sqrt(xx**2 + yy**2)
+
+        disco = (dist <= radio).astype(np.float32)
+
+        anillo = (
+            (dist >= 1.2 * radio) &
+            (dist <= 1.8 * radio)
+        ).astype(np.float32)
+
+        disco /= disco.sum()
+        anillo /= anillo.sum()
+
+        # Media del disco, media del cuadrado (para el desvio) y media del anillo
+        media_disco = cv2.filter2D(imagen, -1, disco)
+        media_disco_2 = cv2.filter2D(imagen_cuadrado, -1, disco)
+        media_anillo = cv2.filter2D(imagen, -1, anillo)
+
+        desvio_disco = np.sqrt(
+            np.maximum(media_disco_2 - media_disco**2, 0)
+        )
+
+        # Contraste RELATIVO: no depende de la exposicion del frame.
+        # (+10 evita dividir por casi cero en frames muy oscuros)
+        referencia = media_anillo + 10.0
+
+        contraste_relativo = (media_anillo - media_disco) / referencia
+
+        # Se penaliza un disco poco uniforme (pestanas, sombras, bordes)
+        puntaje_mapa = (
+            contraste_relativo
+            - PESO_UNIFORMIDAD * desvio_disco / referencia
+        )
+
+        # No evaluar circulos que se salgan del frame
+        margen_valido = radio_externo + 1
+
+        zona_valida = zona_busqueda.copy()
+
+        zona_valida[:margen_valido, :] = False
+        zona_valida[-margen_valido:, :] = False
+        zona_valida[:, :margen_valido] = False
+        zona_valida[:, -margen_valido:] = False
+
+        if not np.any(zona_valida):
+            continue
+
+        puntajes = np.where(
+            zona_valida,
+            puntaje_mapa,
+            -np.inf
+        )
+
+        indice = np.unravel_index(
+            np.argmax(puntajes),
+            puntajes.shape
+        )
+
+        puntaje = float(puntajes[indice])
+
+        if puntaje > mejor_puntaje:
+
+            mejor_puntaje = puntaje
+
+            mejor = {
+                "cx": float(indice[1] / escala),
+                "cy": float(indice[0] / escala),
+                "radio": float(radio / escala),
+                "puntaje": puntaje
+            }
+
+    if mejor is None:
+        return None
+
+    if mejor_puntaje < PUNTAJE_MINIMO:
+        return None
+
+    return mejor
+
+
+def estimar_semilla(ruta_video, n_muestras=N_MUESTRAS_SEMILLA):
+
+    cap = cv2.VideoCapture(str(ruta_video))
+
+    if not cap.isOpened():
+        raise ValueError(f"No se pudo abrir {ruta_video}")
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    indices = np.linspace(
+        0,
+        max(total - 1, 0),
+        n_muestras,
+        dtype=int
+    )
+
+    candidatos = []
+    alto_v, ancho_v = None, None
+
+    for idx in indices:
+
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+
+        ok, fr = cap.read()
+
+        if not ok:
+            continue
+
+        g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
+
+        alto_v, ancho_v = g.shape
+
+        zona = (
+            ZONA_BUSQUEDA[0] * ancho_v,
+            ZONA_BUSQUEDA[1] * ancho_v,
+            ZONA_BUSQUEDA[2] * alto_v,
+            ZONA_BUSQUEDA[3] * alto_v
+        )
+
+        rango = (
+            RADIO_MIN_REL * ancho_v,
+            RADIO_MAX_REL * ancho_v
+        )
+
+        c = detectar_centro_pupila(g, zona, rango, n_radios=8)
+
+        if c is not None:
+            candidatos.append(c)
+
+    cap.release()
+
+    if len(candidatos) < 3:
+        raise ValueError(
+            "No se pudo estimar la semilla de la pupila: "
+            "muy pocas detecciones. Revisar ZONA_BUSQUEDA, "
+            "PUNTAJE_MINIMO o la calidad del video."
+        )
+
+    cxs = np.array([c["cx"] for c in candidatos])
+    cys = np.array([c["cy"] for c in candidatos])
+    rs = np.array([c["radio"] for c in candidatos])
+
+    # Consenso: descartar candidatos lejos de la mediana
+    mediana_x = np.median(cxs)
+    mediana_y = np.median(cys)
+    mediana_r = np.median(rs)
+
+    cerca = np.hypot(cxs - mediana_x, cys - mediana_y) <= mediana_r
+
+    if cerca.sum() < 3:
+        raise ValueError(
+            "Las detecciones de la semilla no son consistentes entre frames. "
+            "Revisar ZONA_BUSQUEDA o PUNTAJE_MINIMO."
+        )
+
+    return {
+        "cx": float(np.median(cxs[cerca])),
+        "cy": float(np.median(cys[cerca])),
+        "radio": float(np.median(rs[cerca])),
+        "ancho": ancho_v,
+        "alto": alto_v,
+        "n_validas": int(cerca.sum()),
+        "n_muestras": len(indices)
+    }
+
+
+def quitar_reflejos(roi_local, zona_disco, radio):
+    """Rellena (inpainting) los reflejos puntuales del flash.
+
+    Un reflejo dentro de la pupila crea un borde muy fuerte que atrae a
+    Snakes/Watershed y deja agujeros en Otsu/K-Means. Se detectan como
+    manchas pequenas entre los pixeles mas brillantes del entorno de la
+    pupila y se rellenan con el valor de sus vecinos.
+    """
+
+    valores = roi_local[zona_disco]
+
+    if valores.size < 50:
+        return roi_local
+
+    umbral = np.percentile(valores, 98)
+
+    brillantes = (
+        (roi_local >= umbral) & zona_disco
+    ).astype(np.uint8)
+
+    cantidad, etiquetas_b, estadisticas_b, _ = (
+        cv2.connectedComponentsWithStats(brillantes, 8)
+    )
+
+    # Solo manchas chicas: una region grande no es un reflejo
+    # (es esclerotica, parpado, etc.)
+    area_maxima = 0.08 * np.pi * radio**2
+
+    reflejos = np.zeros(roi_local.shape, dtype=np.uint8)
+
+    for i in range(1, cantidad):
+        if estadisticas_b[i, cv2.CC_STAT_AREA] <= area_maxima:
+            reflejos[etiquetas_b == i] = 255
+
+    if not np.any(reflejos):
+        return roi_local
+
+    reflejos = cv2.dilate(
+        reflejos,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    )
+
+    return cv2.inpaint(roi_local, reflejos, 3, cv2.INPAINT_TELEA)
+
+
+def elegir_componente_central(binaria, cx, cy):
+    """De una mascara binaria, se queda con la componente conectada
+    que contiene al centro candidato (o la mas cercana a el)."""
+
+    binaria = (binaria > 0).astype(np.uint8)
+
+    cantidad, etiquetas_cc, _, centroides_cc = (
+        cv2.connectedComponentsWithStats(binaria, 8)
+    )
+
+    if cantidad <= 1:
+        return None
+
+    xi = int(round(cx))
+    yi = int(round(cy))
+
+    if (
+        0 <= yi < etiquetas_cc.shape[0] and
+        0 <= xi < etiquetas_cc.shape[1] and
+        etiquetas_cc[yi, xi] > 0
+    ):
+        elegido = etiquetas_cc[yi, xi]
+
+    else:
+        elegido = min(
+            range(1, cantidad),
+            key=lambda i: np.hypot(
+                centroides_cc[i][0] - cx,
+                centroides_cc[i][1] - cy
+            )
+        )
+
+    return (etiquetas_cc == elegido).astype(np.uint8) * 255
+
+
+def segmentar_otsu_local(roi_local, cx, cy, zona_disco):
+
+    # Otsu calculado solo con los pixeles del entorno de la pupila
+    # (pupila + iris), para que el umbral separe pupila de iris
+    # y no iris de esclerotica.
+    valores = roi_local[zona_disco].reshape(-1, 1)
+
+    if valores.shape[0] < 20:
+        return None
+
+    umbral_local, _ = cv2.threshold(
+        valores,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU
+    )
+
+    binaria = (
+        (roi_local <= umbral_local) & zona_disco
+    ).astype(np.uint8) * 255
+
+    return elegir_componente_central(binaria, cx, cy)
+
+
+def segmentar_kmeans_local(roi_local, cx, cy, k, zona_disco):
+
+    # K-Means solo con los pixeles del entorno de la pupila
+    pix = roi_local[zona_disco].reshape(-1, 1).astype(np.float32)
+
+    if pix.shape[0] < 10 * k:
+        return None
+
+    criterio_local = (
+        cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
+        100,
+        0.2
+    )
+
+    _, etiq, centros_k = cv2.kmeans(
+        pix,
+        k,
+        None,
+        criterio_local,
+        3,
+        cv2.KMEANS_PP_CENTERS
+    )
+
+    grupo_oscuro_local = np.argmin(centros_k.flatten())
+
+    binaria = np.zeros(roi_local.shape, dtype=np.uint8)
+
+    binaria[zona_disco] = (
+        (etiq.flatten() == grupo_oscuro_local).astype(np.uint8) * 255
+    )
+
+    return elegir_componente_central(binaria, cx, cy)
+
+
+def segmentar_snake_local(roi_local, cx, cy, radio, zona_disco):
+
+    # Circulo inicial alrededor de la pupila y contorno activo
+    # sobre la imagen suavizada.
+
+    # IMPORTANTE: la fuerza de borde de Snakes depende del contraste
+    # absoluto de la imagen. En frames oscuros (antes del estimulo o
+    # al apagar la luz) el contraste es bajo y las fuerzas internas
+    # (alpha, beta) colapsan el contorno. Se normaliza el contraste
+    # local a [0, 1] usando los pixeles del entorno de la pupila.
+    valores_disco = roi_local[zona_disco].astype(float)
+
+    p_bajo = np.percentile(valores_disco, 1)
+    p_alto = np.percentile(valores_disco, 99)
+
+    roi_normalizada = np.clip(
+        (roi_local.astype(float) - p_bajo) / max(p_alto - p_bajo, 1.0),
+        0,
+        1
+    )
+
+    img = gaussian(
+        roi_normalizada,
+        sigma=1
+    )
+
+    radio_ini = 1.5 * radio
+
+    ang = np.linspace(0, 2 * np.pi, 120, endpoint=False)
+
+    filas = np.clip(
+        cy + radio_ini * np.sin(ang),
+        0,
+        roi_local.shape[0] - 1
+    )
+
+    columnas = np.clip(
+        cx + radio_ini * np.cos(ang),
+        0,
+        roi_local.shape[1] - 1
+    )
+
+    inicial = np.array([filas, columnas]).T
+
+    final = active_contour(
+        img,
+        inicial,
+        alpha=0.015,
+        beta=10,
+        gamma=0.001,
+        w_line=0,
+        w_edge=1,
+        max_num_iter=500,   # menos iteraciones que en 2.1.3 (el video tiene muchos frames)
+        boundary_condition="periodic"
+    )
+
+    puntos = np.round(final[:, ::-1]).astype(np.int32)
+
+    mascara_s = np.zeros(roi_local.shape, dtype=np.uint8)
+
+    cv2.fillPoly(mascara_s, [puntos], 255)
+
+    return mascara_s
+
+
+def segmentar_watershed_local(roi_local, cx, cy, radio, zona_disco):
+
+    # Watershed sobre el gradiente de Sobel con marcadores
+    # (interior seguro de la pupila / exterior)
+    imagen_normalizada = (
+        roi_local.astype(np.float64) / 255.0
+    )
+
+    gradiente = sobel(imagen_normalizada)
+
+    Yl, Xl = np.ogrid[:roi_local.shape[0], :roi_local.shape[1]]
+
+    distancia_l = np.sqrt(
+        (Xl - cx)**2 +
+        (Yl - cy)**2
+    )
+
+    # Marcadores:
+    # 1 = interior seguro de la pupila
+    # 2 = region exterior
+    marcadores_l = np.zeros(roi_local.shape, dtype=np.int32)
+
+    marcadores_l[distancia_l <= 0.30 * radio] = 1
+    marcadores_l[distancia_l >= 1.65 * radio] = 2
+
+    if not np.any(marcadores_l == 1):
+        return None
+
+    if not np.any(marcadores_l == 2):
+        return None
+
+    etiquetas_l = watershed(
+        gradiente,
+        markers=marcadores_l,
+        watershed_line=True
+    )
+
+    return (etiquetas_l == 1).astype(np.uint8) * 255
+
+
+def aplicar_morfologia_video(mascara, operacion):
+
+    # Mismo elemento estructurante que en 2.2.1
+    kernel_v = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE,
+        (3, 3)
+    )
+
+    if operacion == "Erosion":
+        return cv2.erode(mascara, kernel_v, iterations=1)
+
+    if operacion == "Dilatacion":
+        return cv2.dilate(mascara, kernel_v, iterations=1)
+
+    if operacion == "Apertura":
+        return cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel_v)
+
+    if operacion == "Cierre":
+        return cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel_v)
+
+    # "Sin morfologia"
+    return mascara.copy()
+
+
+def rechazar(motivo):
+    MOTIVOS_RECHAZO[motivo] += 1
+    return None
+
+
+def segmentar_pupila(gris, candidato):
+
+    alto_frame, ancho_frame = gris.shape
+
+    cx = candidato["cx"]
+    cy = candidato["cy"]
+    radio = candidato["radio"]
+
+    # Extraer una ROI local alrededor del candidato
+    margen = max(12, int(np.ceil(2.4 * radio)))
+
+    x1 = max(0, int(cx - margen))
+    x2 = min(ancho_frame, int(cx + margen + 1))
+
+    y1 = max(0, int(cy - margen))
+    y2 = min(alto_frame, int(cy + margen + 1))
+
+    roi = gris[y1:y2, x1:x2].copy()
+
+    if roi.size == 0:
+        return rechazar("roi_vacia")
+
+    cx_local = cx - x1
+    cy_local = cy - y1
+
+    # Entorno de la pupila (proporcional al radio candidato)
+    Yl, Xl = np.ogrid[:roi.shape[0], :roi.shape[1]]
+
+    zona_disco = (
+        (Xl - cx_local)**2 + (Yl - cy_local)**2
+    ) <= (FACTOR_DISCO_LOCAL * radio)**2
+
+    # Quitar reflejos del flash antes de segmentar
+    roi = quitar_reflejos(roi, zona_disco, radio)
+
+    # Se usa el metodo elegido en el Modulo 2
+    if METODO_VIDEO == "Otsu":
+        mascara = segmentar_otsu_local(
+            roi, cx_local, cy_local, zona_disco
+        )
+
+    elif METODO_VIDEO.startswith("K-Means"):
+        k_video = int(METODO_VIDEO.split("=")[1])
+        mascara = segmentar_kmeans_local(
+            roi, cx_local, cy_local, k_video, zona_disco
+        )
+
+    elif METODO_VIDEO == "Snakes":
+        mascara = segmentar_snake_local(
+            roi, cx_local, cy_local, radio, zona_disco
+        )
+
+    elif METODO_VIDEO == "Watershed":
+        mascara = segmentar_watershed_local(
+            roi, cx_local, cy_local, radio, zona_disco
+        )
+
+    else:
+        raise ValueError(f"Metodo de segmentacion desconocido: {METODO_VIDEO}")
+
+    if mascara is None:
+        return rechazar("metodo_sin_mascara")
+
+    # Operacion morfologica elegida en el Modulo 2
+    mascara = aplicar_morfologia_video(mascara, OPERACION_VIDEO)
+
+    # La mascara no puede salirse del entorno de la pupila
+    mascara = cv2.bitwise_and(
+        mascara,
+        zona_disco.astype(np.uint8) * 255
+    )
+
+    # Conservar el contorno principal
+    contornos, _ = cv2.findContours(
+        mascara,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contornos:
+        return rechazar("sin_contorno")
+
+    contorno = max(
+        contornos,
+        key=cv2.contourArea
+    )
+
+    # Envolvente convexa: la pupila es convexa, asi que se rellenan
+    # muescas producidas por reflejos del flash o pestanas.
+    contorno = cv2.convexHull(contorno)
+
+    mascara_limpia = np.zeros_like(mascara)
+
+    cv2.drawContours(
+        mascara_limpia,
+        [contorno],
+        -1,
+        255,
+        cv2.FILLED
+    )
+
+    # Controles de calidad
+    area = int(np.count_nonzero(mascara_limpia))
+
+    area_circulo = np.pi * radio**2
+
+    if not (0.35 * area_circulo <= area <= 2.50 * area_circulo):
+        return rechazar("area_fuera_de_rango")
+
+    # Rechazar segmentaciones cortadas por los bordes
+    if (
+        np.any(mascara_limpia[0, :]) or
+        np.any(mascara_limpia[-1, :]) or
+        np.any(mascara_limpia[:, 0]) or
+        np.any(mascara_limpia[:, -1])
+    ):
+        return rechazar("toca_borde")
+
+    perimetro = cv2.arcLength(contorno, True)
+
+    if perimetro <= 0:
+        return rechazar("perimetro_cero")
+
+    circularidad = 4 * np.pi * area / perimetro**2
+
+    if not (CIRCULARIDAD_MIN <= circularidad <= 1.20):
+        return rechazar("circularidad")
+
+    momentos = cv2.moments(
+        mascara_limpia,
+        binaryImage=True
+    )
+
+    if momentos["m00"] == 0:
+        return rechazar("momento_cero")
+
+    centro_final_x = (
+        x1 + momentos["m10"] / momentos["m00"]
+    )
+
+    centro_final_y = (
+        y1 + momentos["m01"] / momentos["m00"]
+    )
+
+    # El centro segmentado debe coincidir con el candidato
+    if np.hypot(
+        centro_final_x - cx,
+        centro_final_y - cy
+    ) > 0.60 * radio:
+        return rechazar("centro_desplazado")
+
+    diametro = 2 * np.sqrt(area / np.pi)
+
+    # Mascara en coordenadas del frame completo
+    mascara_frame = np.zeros_like(gris, dtype=np.uint8)
+
+    mascara_frame[y1:y2, x1:x2] = mascara_limpia
+
+    return {
+        "mascara": mascara_frame,
+        "area": float(area),
+        "diametro": float(diametro),
+        "cx": float(centro_final_x),
+        "cy": float(centro_final_y),
+        "radio": float(diametro / 2),
+        "circularidad": float(circularidad),
+        "puntaje": float(candidato["puntaje"])
+    }
+
+
+def procesar_frame_pupila(gris, anterior=None):
+    """Devuelve (resultado, candidato). Cualquiera puede ser None."""
+
+    if anterior is None:
+
+        # Busqueda en toda la zona de seguimiento
+        zona = ZONA_SEGUIMIENTO
+        rango = RANGO_RADIOS_SEMILLA
+        n_radios = 6
+
+    else:
+
+        # Seguimiento local alrededor de la ultima deteccion,
+        # sin salirse de la zona de la semilla
+        m = 2.0 * anterior["radio"]
+
+        zona = (
+            max(ZONA_SEGUIMIENTO[0], anterior["cx"] - m),
+            min(ZONA_SEGUIMIENTO[1], anterior["cx"] + m),
+            max(ZONA_SEGUIMIENTO[2], anterior["cy"] - m),
+            min(ZONA_SEGUIMIENTO[3], anterior["cy"] + m)
+        )
+
+        rango = (
+            max(RANGO_RADIOS_SEMILLA[0], 0.70 * anterior["radio"]),
+            min(RANGO_RADIOS_SEMILLA[1], 1.40 * anterior["radio"])
+        )
+
+        if rango[0] >= rango[1]:
+            rango = RANGO_RADIOS_SEMILLA
+
+        n_radios = 4
+
+    candidato = detectar_centro_pupila(
+        gris,
+        zona,
+        rango,
+        n_radios=n_radios
+    )
+
+    if candidato is None:
+        MOTIVOS_RECHAZO["sin_candidato"] += 1
+        return None, None
+
+    resultado = segmentar_pupila(gris, candidato)
+
+    if resultado is None:
+        return None, candidato
+
+    if anterior is not None:
+
+        relacion_area = resultado["area"] / anterior["area"]
+
+        # Rechazar variaciones excesivas entre frames
+        if not (
+            1.0 / RELACION_AREA_MAX <= relacion_area <= RELACION_AREA_MAX
+        ):
+            MOTIVOS_RECHAZO["salto_de_area_entre_frames"] += 1
+            return None, candidato
+
+        desplazamiento = np.hypot(
+            resultado["cx"] - anterior["cx"],
+            resultado["cy"] - anterior["cy"]
+        )
+
+        if desplazamiento > DESPLAZAMIENTO_MAX_REL * anterior["radio"]:
+            MOTIVOS_RECHAZO["salto_de_posicion_entre_frames"] += 1
+            return None, candidato
+
+    return resultado, candidato
+
+
+def cerrar_figura(fig, nombre, mostrar=None):
+    """Guarda la figura en resultados/figuras y (opcional) la muestra."""
+    if mostrar is None:
+        mostrar = MOSTRAR_FIGURAS
+    CARPETA_FIGURAS.mkdir(parents=True, exist_ok=True)
+    fig.savefig(CARPETA_FIGURAS / f"{nombre}.png", dpi=130, bbox_inches="tight")
+    if mostrar:
+        plt.show()
+    plt.close(fig)
+
+
+def zonas_desde_semilla(sem):
+    """Misma logica que se usaba para la semilla del video principal."""
+    m = FACTOR_ZONA_SEGUIMIENTO * sem["radio"]
+
+    zona = (
+        max(0.0, sem["cx"] - m),
+        min(float(sem["ancho"]), sem["cx"] + m),
+        max(0.0, sem["cy"] - m),
+        min(float(sem["alto"]), sem["cy"] + m)
+    )
+
+    rmin = max(RADIO_MIN_REL * sem["ancho"], RELACION_RADIO_SEMILLA[0] * sem["radio"])
+    rmax = min(RADIO_MAX_REL * sem["ancho"], RELACION_RADIO_SEMILLA[1] * sem["radio"])
+
+    if rmin >= rmax:
+        rmin, rmax = 0.7 * sem["radio"], 1.4 * sem["radio"]
+
+    return zona, (rmin, rmax)
+
+
+def preparar_mascara_luz(shape, sem):
+    """Anillo entre 2 y 3 radios de la semilla (fuera de la pupila)."""
+    alto, ancho = shape
+    r = sem["radio"]
+    margen = int(np.ceil(3.2 * r))
+
+    x1 = max(0, int(sem["cx"] - margen))
+    x2 = min(ancho, int(sem["cx"] + margen + 1))
+    y1 = max(0, int(sem["cy"] - margen))
+    y2 = min(alto, int(sem["cy"] + margen + 1))
+
+    Y, X = np.ogrid[y1:y2, x1:x2]
+    dist = np.sqrt((X - sem["cx"]) ** 2 + (Y - sem["cy"]) ** 2)
+    mascara = (dist >= 2.0 * r) & (dist <= 3.0 * r)
+
+    return (x1, x2, y1, y2, mascara)
+
+
+def luminosidad_frame(gris, prep):
+    x1, x2, y1, y2, mascara = prep
+    roi = gris[y1:y2, x1:x2]
+    # La mediana reduce la influencia de reflejos y pixeles saturados
+    return float(np.median(roi[mascara])) if mascara.any() else np.nan
+
+
+def tramos_bool(mascara):
+    """Devuelve [(inicio, fin)] de los tramos consecutivos True."""
+    mascara = np.asarray(mascara, dtype=bool)
+    salida, i, n = [], 0, len(mascara)
+    while i < n:
+        if mascara[i]:
+            j = i
+            while j + 1 < n and mascara[j + 1]:
+                j += 1
+            salida.append((i, j))
+            i = j + 1
+        else:
+            i += 1
+    return salida
+
+
+def _mediana_ventana(t, x, t0, t1):
+    m = (t >= t0) & (t < t1) & np.isfinite(x)
+    return float(np.median(x[m])) if m.sum() >= 3 else np.nan
+
+
+def procesar_video(ruta, semilla=None, guardar_revision=False):
+    """
+    Segmenta la pupila frame a frame y mide la luminosidad en UNA sola
+    lectura del video. Devuelve (DataFrame, fps_efectivo, revision, semilla).
+    El eje de tiempo usa los timestamps reales del video (POS_MSEC) y,
+    si no son confiables, cae a indice/fps.
+    """
+    global ZONA_SEGUIMIENTO, RANGO_RADIOS_SEMILLA
+
+    ruta = Path(ruta)
+
+    if semilla is None:
+        semilla = estimar_semilla(ruta)
+
+    zona_previa, rango_previo = ZONA_SEGUIMIENTO, RANGO_RADIOS_SEMILLA
+    ZONA_SEGUIMIENTO, RANGO_RADIOS_SEMILLA = zonas_desde_semilla(semilla)
+
+    MOTIVOS_RECHAZO.clear()
+    cv2.setRNGSeed(0)   # K-Means reproducible
+
+    cap = cv2.VideoCapture(str(ruta))
+
+    try:
+        if not cap.isOpened():
+            raise ValueError(f"No se pudo abrir {ruta}")
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        if fps <= 0:
+            raise ValueError("FPS invalido")
+
+        paso = max(1, int(round(fps / FRECUENCIA_VISUALIZACION)))
+
+        registros, revision, marcas_ms = [], {}, []
+        anterior, fallos, idx = None, 0, 0
+        prep_luz, caja = None, None
+
+        while True:
+
+            marca_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+            ret, frame = cap.read()
+
+            if not ret:
+                break
+
+            gris = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+            if prep_luz is None:
+                prep_luz = preparar_mascara_luz(gris.shape, semilla)
+                alto_f, ancho_f = gris.shape
+                r0 = semilla["radio"]
+                caja = (
+                    max(0, int(ZONA_SEGUIMIENTO[0] - r0)),
+                    min(ancho_f, int(ZONA_SEGUIMIENTO[1] + r0)),
+                    max(0, int(ZONA_SEGUIMIENTO[2] - r0)),
+                    min(alto_f, int(ZONA_SEGUIMIENTO[3] + r0))
+                )
+
+            resultado, candidato = procesar_frame_pupila(gris, anterior)
+
+            if resultado is None:
+                fallos += 1
+                # Si se pierde el seguimiento, volver a buscar en la zona de la semilla
+                if fallos >= 3:
+                    anterior = None
+                    resultado, candidato = procesar_frame_pupila(gris)
+
+            if resultado is not None:
+                anterior = resultado
+                fallos = 0
+                fila = {
+                    "area_px2": resultado["area"],
+                    "diametro_px": resultado["diametro"],
+                    "centro_x": resultado["cx"],
+                    "centro_y": resultado["cy"],
+                    "circularidad": resultado["circularidad"],
+                    "puntaje_deteccion": resultado["puntaje"],
+                    "detectada": 1
+                }
+            else:
+                fila = {
+                    "area_px2": np.nan, "diametro_px": np.nan,
+                    "centro_x": np.nan, "centro_y": np.nan,
+                    "circularidad": np.nan, "puntaje_deteccion": np.nan,
+                    "detectada": 0
+                }
+
+            fila["frame"] = idx
+            fila["luminosidad"] = luminosidad_frame(gris, prep_luz)
+            registros.append(fila)
+            marcas_ms.append(marca_ms)
+
+            # Frames de revision: se guarda solo el recorte alrededor del ojo
+            # (no el frame completo) para no llenar la memoria.
+            if guardar_revision and idx % paso == 0:
+                bx1, bx2, by1, by2 = caja
+
+                mascara = (
+                    resultado["mascara"][by1:by2, bx1:bx2].copy()
+                    if resultado is not None
+                    else np.zeros((by2 - by1, bx2 - bx1), dtype=np.uint8)
+                )
+
+                cand = None
+                if candidato is not None:
+                    cand = dict(candidato)
+                    cand["cx"] -= bx1
+                    cand["cy"] -= by1
+
+                revision[idx] = (
+                    frame[by1:by2, bx1:bx2].copy(),
+                    mascara,
+                    fila["area_px2"],
+                    cand
+                )
+
+            idx += 1
+
+    finally:
+        cap.release()
+        ZONA_SEGUIMIENTO, RANGO_RADIOS_SEMILLA = zona_previa, rango_previo
+
+    if not registros:
+        raise ValueError("No se procesaron frames")
+
+    df = pd.DataFrame(registros)
+    n = len(df)
+
+    # Eje de tiempo: timestamps reales si son consistentes, si no indice/fps
+    t_idx = np.arange(n) / fps
+    t_ms = np.asarray(marcas_ms, dtype=float) / 1000.0
+
+    usa_timestamps = (
+        n > 2
+        and np.all(np.isfinite(t_ms))
+        and np.all(np.diff(t_ms) > 0)
+        and abs((t_ms[-1] - t_ms[0]) - t_idx[-1]) < 0.2 * max(t_idx[-1], 1e-9)
+    )
+
+    tiempo = (t_ms - t_ms[0]) if usa_timestamps else t_idx
+    df["tiempo_s"] = tiempo
+
+    fps_efectivo = (n - 1) / tiempo[-1] if n > 1 and tiempo[-1] > 0 else fps
+
+    print(
+        f"  Eje de tiempo: "
+        f"{'timestamps del video' if usa_timestamps else 'indice/fps'} | "
+        f"fps nominal {fps:.2f}, efectivo {fps_efectivo:.2f} | "
+        f"dif. maxima vs indice/fps: {np.max(np.abs(tiempo - t_idx)):.3f} s"
+    )
+
+    return df, float(fps_efectivo), revision, semilla
+
+
+def filtro_hampel(valores, ventana=7, n_sigmas=3.0, piso_rel=0.05):
+    """Marca como NaN los valores que se alejan demasiado de la mediana
+    de su vecindad (picos aislados, segmentaciones erroneas)."""
+
+    serie = pd.Series(valores, dtype=float)
+
+    mediana = serie.rolling(ventana, center=True, min_periods=3).median()
+    desvio_abs = (serie - mediana).abs()
+    mad = desvio_abs.rolling(ventana, center=True, min_periods=3).median()
+
+    umbral = np.maximum(n_sigmas * 1.4826 * mad, piso_rel * mediana)
+
+    atipicos = (desvio_abs > umbral).to_numpy()
+
+    salida = serie.copy()
+    salida[atipicos] = np.nan
+
+    return salida.to_numpy(), atipicos
+
+
+def interpolar_huecos_cortos(valores, max_hueco=3):
+    """Interpola solamente huecos de hasta max_hueco frames."""
+
+    serie = pd.Series(valores, dtype=float)
+
+    salida = serie.interpolate(method="linear", limit_area="inside")
+
+    es_nan = serie.isna()
+    grupos = es_nan.ne(es_nan.shift()).cumsum()
+
+    for _, bloque in serie.groupby(grupos):
+        if bloque.isna().all() and len(bloque) > max_hueco:
+            salida.loc[bloque.index] = np.nan
+
+    return salida.to_numpy().copy()
+
+
+def detectar_transiciones_luz(t, lum, fps):
+    """
+    Devuelve (eventos, luminosidad_suave, umbral).
+    eventos = [(tiempo_s, signo, escalon)] ordenados en el tiempo;
+    signo +1 = luz sube (encendido), -1 = luz baja (apagado).
+    El instante se toma como el primer cruce del 20% del escalon
+    (no el maximo de la derivada, que cae a mitad de la subida).
+    """
+
+    lum = np.asarray(lum, dtype=float)
+
+    if len(lum) < 10 or not np.any(np.isfinite(lum)):
+        return [], np.full(len(lum), np.nan), np.nan
+
+    vent = max(3, int(round(0.15 * fps)))
+    if vent % 2 == 0:
+        vent += 1
+
+    ls = (
+        pd.Series(lum)
+        .interpolate(limit_direction="both")
+        .rolling(vent, center=True, min_periods=1)
+        .median()
+        .to_numpy()
+    )
+
+    n = max(3, int(round(0.30 * fps)))
+
+    cambios = np.full(len(ls), np.nan)
+
+    for i in range(n, len(ls) - n):
+        cambios[i] = np.median(ls[i:i + n]) - np.median(ls[i - n:i])
+
+    validos = cambios[np.isfinite(cambios)]
+
+    if validos.size == 0:
+        return [], ls, np.nan
+
+    mad = np.median(np.abs(validos - np.median(validos)))
+
+    umbral = max(4 * 1.4826 * mad, 0.08 * np.median(ls), 5.0)
+
+    # Candidatos: subidas y bajadas sostenidas
+    candidatos = []
+
+    for signo in (+1, -1):
+
+        idx = np.where(signo * cambios > umbral)[0]
+
+        if idx.size == 0:
+            continue
+
+        for g in np.split(idx, np.where(np.diff(idx) > n)[0] + 1):
+            candidatos.append((int(g[np.argmax(signo * cambios[g])]), signo))
+
+    # Refinar el instante de cada candidato
+    eventos = []
+
+    for pico, signo in sorted(candidatos):
+
+        tp = t[pico]
+
+        nivel_pre = _mediana_ventana(t, ls, tp - 0.8, tp - 0.3)
+        nivel_post = _mediana_ventana(t, ls, tp + 0.3, tp + 0.8)
+
+        if not (np.isfinite(nivel_pre) and np.isfinite(nivel_post)):
+            continue
+
+        escalon = nivel_post - nivel_pre
+
+        if np.sign(escalon) != signo or abs(escalon) < umbral:
+            continue
+
+        nivel_cruce = nivel_pre + UMBRAL_ESCALON_LUZ * escalon
+
+        zona = np.where((t >= tp - 0.6) & (t <= tp + 0.6))[0]
+        cruces = zona[signo * (ls[zona] - nivel_cruce) >= 0]
+
+        t_evento = float(t[cruces[0]]) if cruces.size else float(tp)
+
+        eventos.append((t_evento, signo, float(escalon)))
+
+    # Descartar escalones chicos (p. ej. el pico transitorio del flash al
+    # decaer) y quedarse con transiciones que alternan de signo
+    if eventos:
+        maximo = max(abs(e[2]) for e in eventos)
+        eventos = [e for e in eventos if abs(e[2]) >= 0.4 * maximo]
+
+    depurados = []
+
+    for e in sorted(eventos):
+        if depurados and depurados[-1][1] == e[1]:
+            if abs(e[2]) > abs(depurados[-1][2]):
+                depurados[-1] = e
+        else:
+            depurados.append(e)
+
+    return depurados, ls, float(umbral)
+
+
+def marcar_eventos(t, area_limpia, cx, cy, radio_ref, fps):
+    """
+    Columna 'evento' por frame:
+      - parpadeo: tramo sin medicion valida (no detectada o atipica) de
+        MIN_DURACION_PARPADEO_S a MAX_DURACION_PARPADEO_S
+      - perdida_seguimiento: mismo tramo pero mas largo
+      - mov_ocular: salto del centro entre frames > SALTO_OCULAR_REL * radio
+    """
+
+    n = len(t)
+    evento = np.full(n, "", dtype=object)
+
+    min_frames = max(2, int(round(MIN_DURACION_PARPADEO_S * fps)))
+
+    for i, j in tramos_bool(~np.isfinite(area_limpia)):
+
+        if j - i + 1 < min_frames:
+            continue
+
+        duracion = (j - i + 1) / fps
+
+        evento[i:j + 1] = (
+            "parpadeo" if duracion <= MAX_DURACION_PARPADEO_S
+            else "perdida_seguimiento"
+        )
+
+    salto = np.hypot(np.diff(cx), np.diff(cy))
+
+    indices = np.where(
+        np.isfinite(salto) & (salto > SALTO_OCULAR_REL * radio_ref)
+    )[0] + 1
+
+    for k in indices:
+        if evento[k] == "":
+            evento[k] = "mov_ocular"
+
+    return evento
+
+
+def mostrar_revision(revision, fps, nombre, mostrar=None):
+    """3.2.4: frames de revision con el contorno detectado, en tandas."""
+
+    indices = sorted(revision)
+    POR_TANDA = 10
+
+    for k, inicio in enumerate(range(0, len(indices), POR_TANDA)):
+
+        tanda = indices[inicio:inicio + POR_TANDA]
+
+        fig, ax = plt.subplots(2, len(tanda), figsize=(15, 3.5), squeeze=False)
+
+        for j, indice in enumerate(tanda):
+
+            frame_c, mascara, area, candidato = revision[indice]
+
+            original_rgb = cv2.cvtColor(frame_c, cv2.COLOR_BGR2RGB)
+            con_contorno = original_rgb.copy()
+
+            contornos, _ = cv2.findContours(
+                mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(con_contorno, contornos, -1, (0, 255, 0), 2)
+
+            if candidato is not None:
+                cv2.circle(
+                    con_contorno,
+                    (int(round(candidato["cx"])), int(round(candidato["cy"]))),
+                    int(round(candidato["radio"])), (255, 0, 0), 1
+                )
+
+            ax[0, j].imshow(original_rgb)
+            ax[0, j].set_title(f"{indice / fps:.2f} s", fontsize=8)
+
+            ax[1, j].imshow(con_contorno)
+            ax[1, j].set_title(
+                f"{area:.0f} px²" if np.isfinite(area) else "No detectada",
+                fontsize=8
+            )
+
+            ax[0, j].axis("off")
+            ax[1, j].axis("off")
+
+        plt.subplots_adjust(left=0.01, right=0.99, top=0.88,
+                            bottom=0.05, wspace=0.08, hspace=0.25)
+
+        cerrar_figura(fig, f"revision_{nombre}_{k + 1:02d}", mostrar)
+
+
+def filtro_mediana_local(valores, fps):
+    """Descarta valores que se alejan demasiado de la mediana de su
+    entorno (0.3 s). Atrapa saltos de varios frames seguidos (por ejemplo,
+    el borde del parpado al cerrarse) que el filtro de Hampel no detecta."""
+
+    serie = pd.Series(valores, dtype=float)
+
+    ventana = max(7, int(round(VENTANA_FILTRO_LOCAL_S * fps)))
+    if ventana % 2 == 0:
+        ventana += 1
+
+    mediana = serie.rolling(ventana, center=True, min_periods=3).median()
+
+    relativo = (serie - mediana).abs() / mediana
+
+    salida = serie.copy()
+    salida[(relativo > TOLERANCIA_FILTRO_LOCAL).to_numpy()] = np.nan
+
+    return salida.to_numpy()
+
+
+def limpiar_bordes_de_huecos(valores, fps):
+    """Elimina mediciones poco confiables pegadas a un parpadeo:
+    (1) un pequeno margen antes y despues de cada hueco largo y
+    (2) tramos validos demasiado cortos (quedaron aislados)."""
+
+    v = np.asarray(valores, dtype=float).copy()
+    n = len(v)
+
+    min_hueco = max(2, int(round(MIN_DURACION_PARPADEO_S * fps)))
+    margen = max(2, int(round(MARGEN_PARPADEO_S * fps)))
+
+    for i, j in tramos_bool(~np.isfinite(v)):
+        if j - i + 1 >= min_hueco:
+            v[max(0, i - margen):i] = np.nan
+            v[j + 1:min(n, j + 1 + margen)] = np.nan
+
+    min_tramo = max(5, int(round(MIN_TRAMO_VALIDO_S * fps)))
+
+    for i, j in tramos_bool(np.isfinite(v)):
+        if j - i + 1 < min_tramo:
+            v[i:j + 1] = np.nan
+
+    return v
+
+
+def procesar_serie_area(areas, fps):
+    """Hampel -> filtro de mediana local -> limpieza de bordes de parpadeo
+    -> interpolacion de huecos de hasta 3 frames -> mediana de 5 frames.
+    Devuelve (serie_limpia_con_NaN, descartados, serie_procesada)."""
+
+    areas = np.asarray(areas, dtype=float)
+
+    sin_atipicos, _ = filtro_hampel(areas)
+    sin_atipicos = filtro_mediana_local(sin_atipicos, fps)
+    limpia = limpiar_bordes_de_huecos(sin_atipicos, fps)
+
+    interpolada = interpolar_huecos_cortos(limpia, max_hueco=3)
+
+    procesada = (
+        pd.Series(interpolada)
+        .rolling(window=5, center=True, min_periods=3)
+        .median()
+        .to_numpy()
+        .copy()
+    )
+
+    # Mantener los intervalos sin mediciones
+    procesada[~np.isfinite(interpolada)] = np.nan
+
+    descartados = np.isfinite(areas) & ~np.isfinite(limpia)
+
+    return limpia, descartados, procesada
+
+
+def _suavizar_extremo(valores, fps):
+    """Mediana movil (0.25 s) para buscar minimos/maximos sin que un
+    pico aislado de segmentacion se confunda con la respuesta real."""
+
+    w = max(5, int(round(VENTANA_EXTREMO_S * fps)))
+    if w % 2 == 0:
+        w += 1
+
+    suave = (
+        pd.Series(valores)
+        .rolling(w, center=True, min_periods=w // 2 + 1)
+        .median()
+        .to_numpy()
+    )
+
+    return suave if np.any(np.isfinite(suave)) else np.asarray(valores, float)
+
+
+def _referencia_inmediata(t, a, t0):
+    """Area de referencia = mediana de las mediciones validas justo antes de t0
+    (se usa como referencia previa al apagado, para la redilatacion).
+    Se empieza por una ventana corta (para no arrastrar tendencias previas) y
+    se agranda si hay un parpadeo cerca. Devuelve (valor, inicio_de_ventana)."""
+
+    for ventana in VENTANAS_BASAL_S:
+        valor = _mediana_ventana(t, a, t0 - ventana, t0)
+        if np.isfinite(valor):
+            return valor, t0 - ventana
+
+    return np.nan, t0 - VENTANAS_BASAL_S[-1]
+
+
+def _basal_previo(t, a, t0):
+    """Area basal previa al encendido (constriccion).
+
+    Por defecto es la mediana de los 0.5 s inmediatamente anteriores al
+    estimulo. Pero si esa ventana esta contaminada (un parpadeo, o el destello
+    o el rebote de la segmentacion justo al encender), se usa en su lugar la
+    ventana de 0.5 s mas "tranquila" (menor dispersion) de los 2 s previos, sin
+    contar los ultimos 0.25 s. Entre las igual de tranquilas se elige la mas
+    reciente.
+
+    Devuelve (valor, inicio, fin) de la ventana usada.
+    """
+
+    ventana = VENTANAS_BASAL_S[0]
+
+    # 1) Ventana inmediata
+    m = (t >= t0 - ventana) & (t < t0) & np.isfinite(a)
+
+    inmediata = None
+
+    if m.sum() >= 5:
+        x = a[m]
+        mediana = float(np.median(x))
+        dispersion = float(np.median(np.abs(x - mediana)))
+        inmediata = (mediana, dispersion)
+
+    # 2) Ventanas candidatas "tranquilas" dentro de los 2 s previos
+    fin_max = t0 - BASAL_MARGEN_S
+    inicio = max(t[0], t0 - BASAL_RETROCESO_S)
+
+    candidatas = []
+
+    for ini in np.arange(inicio, fin_max - ventana + 1e-9, 0.1):
+
+        mk = (t >= ini) & (t < ini + ventana) & np.isfinite(a)
+
+        if mk.sum() >= 5:
+            x = a[mk]
+            med = float(np.median(x))
+            disp = float(np.median(np.abs(x - med)))
+            candidatas.append((float(ini), med, disp))
+
+    tranquila = None
+
+    if candidatas:
+
+        minima = min(c[2] for c in candidatas)
+
+        elegibles = [
+            c for c in candidatas
+            if c[2] <= 1.5 * minima + 0.005 * abs(c[1])
+        ]
+
+        ini, med, _ = max(elegibles)
+
+        tranquila = (med, ini, ini + ventana, minima)
+
+    # 3) Decidir
+    if inmediata is not None:
+
+        usar_inmediata = (
+            tranquila is None
+            or inmediata[1] <= 2 * tranquila[3] + 0.02 * abs(inmediata[0])
+        )
+
+        if usar_inmediata:
+            return inmediata[0], t0 - ventana, t0
+
+    if tranquila is not None:
+        return tranquila[0], tranquila[1], tranquila[2]
+
+    # Respaldo: ventanas inmediatas mas largas
+    valor, ini = _referencia_inmediata(t, a, t0)
+
+    return valor, ini, t0
+
+
+def _velocidad_pico(tr, ar, fps, signo):
+    """Pendiente maxima (px2/s) medida sobre ~0.2 s, sin cruzar huecos de datos.
+    signo = -1 para constriccion (area que baja), +1 para redilatacion."""
+
+    k = max(2, int(round(0.2 * fps)))
+
+    if len(tr) <= k:
+        return np.nan
+
+    dt = tr[k:] - tr[:-k]
+    pendiente = signo * (ar[k:] - ar[:-k]) / dt
+    sin_hueco = dt <= 1.5 * k / fps
+
+    if not np.any(sin_hueco):
+        return np.nan
+
+    return float(np.max(pendiente[sin_hueco]))
+
+
+def _constriccion(t, a, t_on, t_off, fps):
+
+    hay_on = np.isfinite(t_on)
+
+    if hay_on:
+        t0 = t_on
+        # Basal: mediana de lo medido justo antes del estimulo
+        basal, t_base_ini, t_base_fin = _basal_previo(t, a, t0)
+        fin = t0 + VENTANA_CONSTRICCION_S
+        if np.isfinite(t_off):
+            fin = min(fin, t_off)
+    else:
+        # Plan B: no se detecto la luz -> amplitud y velocidad pico, sin latencia
+        t0 = t[0] + VENTANA_BASAL_S
+        basal = _mediana_ventana(t, a, t[0], t0)
+        fin = t[-1]
+        t_base_ini = t[0]
+        t_base_fin = t0
+
+    if not np.isfinite(basal):
+        return {"estado_constriccion": "Basal insuficiente"}
+
+    en_ventana = (t >= t0) & (t <= fin)
+    validos = en_ventana & np.isfinite(a)
+
+    if validos.sum() < 5 or validos.sum() < MIN_PROPORCION_VALIDA * en_ventana.sum():
+        return {
+            "area_basal_px2": float(basal),
+            "estado_constriccion": "Respuesta incompleta"
+        }
+
+    tr, ar = t[validos], a[validos]
+
+    ar_suave = _suavizar_extremo(ar, fps)
+
+    i_min = int(np.nanargmin(ar_suave))
+    a_min = float(ar_suave[i_min])
+    t_min = float(tr[i_min])
+    amp = basal - a_min
+
+    R = {
+        "area_basal_px2": float(basal),
+        "area_minima_px2": a_min,
+        "tiempo_minimo_s": t_min
+    }
+
+    if amp <= 0:
+        R["estado_constriccion"] = "Sin constriccion"
+        return R
+
+    R["amplitud_px2"] = float(amp)
+    R["amplitud_pct"] = float(100 * amp / basal)
+
+    # Ruido de la medicion antes del estimulo
+    vb = a[(t >= t_base_ini) & (t < t_base_fin) & np.isfinite(a)]
+
+    ruido = (
+        1.4826 * np.median(np.abs(vb - np.median(vb)))
+        if vb.size >= 3 else 0.0
+    )
+
+    # Velocidad pico de constriccion: pendiente maxima entre t0 y el minimo
+    pico = _velocidad_pico(tr[:i_min + 1], ar[:i_min + 1], fps, -1)
+    if np.isfinite(pico):
+        R["velocidad_constriccion_pico_px2_s"] = pico
+
+    # Si la amplitud es comparable al ruido, el inicio de la constriccion
+    # no se puede ubicar con confianza: se informa amplitud, sin latencia.
+    if ruido > 0 and amp < AMPLITUD_MIN_SOBRE_RUIDO * ruido:
+        R["estado_constriccion"] = "Parcial (amplitud comparable al ruido: sin latencia)"
+        return R
+
+    # Umbral de inicio: 5% de la amplitud o 3 sigmas del ruido basal
+    paso_inicio = min(
+        max(FRACCION_INICIO_CONSTRICCION * amp, 3 * ruido),
+        0.5 * amp
+    )
+
+    umbral_inicio = basal - paso_inicio
+
+    n_sostenido = max(3, int(round(DURACION_SOSTENIDA_S * fps)))
+
+    i_ini = None
+
+    for i in range(i_min + 1):
+        tramo = ar[i:i + n_sostenido]
+        if len(tramo) == n_sostenido and np.all(tramo <= umbral_inicio):
+            i_ini = i
+            break
+
+    if i_ini is not None:
+
+        t_ini = float(tr[i_ini])
+        R["tiempo_inicio_s"] = t_ini
+
+        if hay_on:
+            R["latencia_s"] = float(t_ini - t_on)
+
+        if t_min - t_ini > 0:
+            R["velocidad_constriccion_px2_s"] = float(amp / (t_min - t_ini))
+
+        if not hay_on:
+            R["estado_constriccion"] = "Parcial (luz no detectada: sin latencia)"
+        elif R["latencia_s"] < LATENCIA_MIN_FISIOLOGICA_S:
+            R["estado_constriccion"] = "Calculada (latencia < 0.1 s: revisar)"
+        else:
+            R["estado_constriccion"] = "Calculada"
+
+    else:
+
+        if hay_on and t_min > t_on:
+            R["velocidad_constriccion_px2_s"] = float(amp / (t_min - t_on))
+
+        R["estado_constriccion"] = (
+            "Parcial (inicio no identificado: sin latencia)"
+            if hay_on else
+            "Parcial (luz no detectada: sin latencia)"
+        )
+
+    return R
+
+
+def _redilatacion(t, a, t_off, ons, fps):
+
+    # La redilatacion se mide desde el APAGADO, no desde el minimo.
+    a_ref, _ = _referencia_inmediata(t, a, t_off)
+
+    if not np.isfinite(a_ref):
+        return {"estado_redilatacion": "Referencia insuficiente"}
+
+    fin = min(t_off + VENTANA_REDILATACION_S, t[-1])
+
+    siguientes = [x for x in ons if x > t_off]
+    if siguientes:
+        fin = min(fin, siguientes[0])
+
+    en_ventana = (t >= t_off) & (t <= fin)
+    validos = en_ventana & np.isfinite(a)
+
+    R = {"area_ref_redilatacion_px2": float(a_ref)}
+
+    if validos.sum() < 5 or validos.sum() < MIN_PROPORCION_VALIDA * en_ventana.sum():
+        R["estado_redilatacion"] = "Respuesta incompleta"
+        return R
+
+    tr, ar = t[validos], a[validos]
+
+    if tr[-1] - t_off < DURACION_MIN_REDILATACION_S:
+        R["estado_redilatacion"] = "Respuesta insuficiente (video termina poco despues del apagado)"
+        return R
+
+    # Area al FINAL de la ventana: mediana de las ultimas mediciones validas.
+    # No se usa el maximo de la ventana: un valor alto aislado cerca del apagado
+    # (parpadeo, destello) daria un tiempo casi nulo y una velocidad absurda.
+    cola = tr >= (tr[-1] - ULTIMOS_REDILATACION_S)
+    a_fin = float(np.median(ar[cola]))
+    t_fin = float(np.median(tr[cola]))
+    amp = a_fin - a_ref
+
+    R["area_max_redilatacion_px2"] = a_fin
+    R["tiempo_max_redilatacion_s"] = t_fin
+
+    if amp <= 0:
+        R["estado_redilatacion"] = "Sin redilatacion"
+        return R
+
+    R["velocidad_redilatacion_px2_s"] = float(amp / (t_fin - t_off))
+
+    pico = _velocidad_pico(tr, ar, fps, +1)
+    if np.isfinite(pico):
+        R["velocidad_redilatacion_pico_px2_s"] = pico
+
+    R["estado_redilatacion"] = "Calculada"
+
+    return R
+
+
+def calcular_parametros(t, a, eventos, fps):
+    """Clasifica el registro (A: la luz sube primero / B: la luz baja primero)
+    y calcula parametros de constriccion (desde el encendido) y de
+    redilatacion (desde el apagado). Siempre devuelve las mismas claves."""
+
+    nan = np.nan
+
+    P = {
+        "tipo_registro": "Indeterminado",
+        "tiempo_estimulo_s": nan, "tiempo_apagado_s": nan,
+        "area_basal_px2": nan, "area_minima_px2": nan,
+        "tiempo_inicio_s": nan, "tiempo_minimo_s": nan,
+        "latencia_s": nan,
+        "amplitud_px2": nan, "amplitud_pct": nan,
+        "velocidad_constriccion_px2_s": nan,
+        "velocidad_constriccion_pico_px2_s": nan,
+        "area_ref_redilatacion_px2": nan,
+        "area_max_redilatacion_px2": nan,
+        "tiempo_max_redilatacion_s": nan,
+        "velocidad_redilatacion_px2_s": nan,
+        "velocidad_redilatacion_pico_px2_s": nan,
+        "estado_constriccion": "No calculada",
+        "estado_redilatacion": "No calculada"
+    }
+
+    t = np.asarray(t, dtype=float)
+    a = np.asarray(a, dtype=float)
+
+    ons = [e[0] for e in eventos if e[1] > 0]
+    offs_todos = [e[0] for e in eventos if e[1] < 0]
+
+    t_on = ons[0] if ons else nan
+
+    offs = [x for x in offs_todos if (not np.isfinite(t_on)) or x > t_on]
+    t_off = offs[0] if offs else nan
+
+    P["tiempo_estimulo_s"] = t_on
+    P["tiempo_apagado_s"] = t_off
+
+    if eventos:
+        P["tipo_registro"] = "A" if eventos[0][1] > 0 else "B"
+
+    sin_luz = len(eventos) == 0
+
+    if np.isfinite(t_on) or sin_luz:
+        P.update(_constriccion(t, a, t_on, t_off, fps))
+    else:
+        P["estado_constriccion"] = "No aplica (sin encendido)"
+
+    if np.isfinite(t_off):
+        P.update(_redilatacion(t, a, t_off, ons, fps))
+    elif sin_luz:
+        P["estado_redilatacion"] = "No aplica (luz no detectada)"
+    else:
+        P["estado_redilatacion"] = "No aplica (sin apagado)"
+
+    return P
+
+
+def analizar_registro(df, fps):
+
+    t = df["tiempo_s"].to_numpy(float)
+    areas = df["area_px2"].to_numpy(float)
+
+    limpia, descartados, a_proc = procesar_serie_area(areas, fps)
+    d_proc = 2 * np.sqrt(a_proc / np.pi)
+
+    radio_ref = np.nanmedian(df["diametro_px"].to_numpy(float)) / 2
+
+    # Los parpadeos se marcan sobre la medicion cruda (frames donde NO se
+    # detecto pupila), no sobre la serie ya filtrada.
+    evento = marcar_eventos(
+        t, areas,
+        df["centro_x"].to_numpy(float),
+        df["centro_y"].to_numpy(float),
+        radio_ref, fps
+    )
+
+    # La luminosidad medida durante un parpadeo no sirve (el parpado tapa
+    # el ojo): se descarta y se interpola antes de buscar el estimulo.
+    lum = df["luminosidad"].to_numpy(float).copy()
+    margen = max(2, int(round(MARGEN_PARPADEO_S * fps)))
+
+    for etiqueta in ("parpadeo", "perdida_seguimiento"):
+        for i, j in tramos_bool(evento == etiqueta):
+            lum[max(0, i - margen):j + margen + 1] = np.nan
+
+    eventos_luz, lum_suave, _ = detectar_transiciones_luz(t, lum, fps)
+
+    params = calcular_parametros(t, a_proc, eventos_luz, fps)
+
+    out = pd.DataFrame({
+        "frame": df["frame"].to_numpy(),
+        "tiempo_s": t,
+        "area_original_px2": areas,
+        "area_procesada_px2": a_proc,
+        "diametro_original_px": df["diametro_px"].to_numpy(float),
+        "diametro_procesado_px": d_proc,
+        "centro_x": df["centro_x"].to_numpy(float),
+        "centro_y": df["centro_y"].to_numpy(float),
+        "circularidad": df["circularidad"].to_numpy(float),
+        "detectada": df["detectada"].to_numpy(),
+        "luminosidad": df["luminosidad"].to_numpy(float),
+        "luminosidad_suave": lum_suave,
+        "descartado": descartados.astype(int),
+        "evento": evento
+    })
+
+    conteo = {
+        "n_parpadeos": len(tramos_bool(evento == "parpadeo")),
+        "n_perdidas_seguimiento": len(tramos_bool(evento == "perdida_seguimiento")),
+        "n_mov_oculares": len(tramos_bool(evento == "mov_ocular")),
+        "n_descartados": int(descartados.sum())
+    }
+
+    return out, params, eventos_luz, conteo
+
+
+def graficar_curvas(out, nombre, mostrar):
+    """3.2.2: area y diametro en funcion del tiempo."""
+
+    t = out["tiempo_s"].to_numpy()
+    area_o = out["area_original_px2"].to_numpy()
+    area_p = out["area_procesada_px2"].to_numpy()
+    diam_o = out["diametro_original_px"].to_numpy()
+    diam_p = out["diametro_procesado_px"].to_numpy()
+    descartados = out["descartado"].to_numpy() == 1
+
+    fig, ax = plt.subplots(2, 1, figsize=(11, 6), sharex=True)
+
+    ax[0].plot(t, area_o, color="gray", alpha=0.5, label="Medicion original")
+
+    if descartados.any():
+        ax[0].scatter(
+            t[descartados], area_o[descartados],
+            color="red", s=14, zorder=3, label="Atipicos descartados"
+        )
+
+    ax[0].plot(t, area_p, color="blue", label="Serie procesada")
+
+    ax[0].set_title(
+        f"Area pupilar en funcion del tiempo ({METODO_VIDEO} + {OPERACION_VIDEO}) - {nombre}"
+    )
+    ax[0].set_ylabel("Area (px²)")
+    ax[0].legend()
+    ax[0].grid(alpha=0.3)
+
+    ax[1].plot(t, diam_o, color="gray", alpha=0.5)
+    ax[1].plot(t, diam_p, color="blue")
+
+    ax[1].set_title("Diametro pupilar en funcion del tiempo")
+    ax[1].set_xlabel("Tiempo (s)")
+    ax[1].set_ylabel("Diametro equivalente (px)")
+    ax[1].grid(alpha=0.3)
+
+    plt.tight_layout()
+    cerrar_figura(fig, f"area_diametro_{nombre}", mostrar)
+
+
+def graficar_luz(out, eventos_luz, nombre, mostrar):
+    """3.2.3: deteccion automatica del estimulo luminoso."""
+
+    t = out["tiempo_s"].to_numpy()
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+
+    ax.plot(t, out["luminosidad_suave"], color="orange", label="Luminosidad")
+
+    usadas = set()
+
+    for t_ev, signo, _ in eventos_luz:
+
+        etiqueta = "Encendido estimado" if signo > 0 else "Apagado estimado"
+
+        ax.axvline(
+            t_ev,
+            color="red" if signo > 0 else "blue",
+            linestyle="--",
+            label=etiqueta if etiqueta not in usadas else None
+        )
+
+        usadas.add(etiqueta)
+
+    ax.set_xlabel("Tiempo (s)")
+    ax.set_ylabel("Intensidad mediana (0-255)")
+    ax.set_title(f"Deteccion automatica del estimulo luminoso - {nombre}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    cerrar_figura(fig, f"estimulo_{nombre}", mostrar)
+
+
+def graficar_parametros(out, P, nombre, mostrar):
+    """3.2.3: parametros sobre la curva de area pupilar."""
+
+    fig, ax = plt.subplots(figsize=(11, 4))
+
+    ax.plot(
+        out["tiempo_s"], out["area_procesada_px2"],
+        color="blue", label="Area pupilar procesada"
+    )
+
+    if np.isfinite(P["tiempo_estimulo_s"]):
+        ax.axvline(P["tiempo_estimulo_s"], color="red",
+                   linestyle="--", label="Estimulo")
+
+    if np.isfinite(P["tiempo_apagado_s"]):
+        ax.axvline(P["tiempo_apagado_s"], color="navy",
+                   linestyle="--", label="Apagado")
+
+    if np.isfinite(P["tiempo_inicio_s"]):
+        ax.axvline(P["tiempo_inicio_s"], color="green",
+                   linestyle="--", label="Inicio de constriccion")
+
+    if np.isfinite(P["tiempo_minimo_s"]):
+        ax.scatter(P["tiempo_minimo_s"], P["area_minima_px2"],
+                   color="black", s=50, label="Area minima")
+
+    if np.isfinite(P["area_basal_px2"]):
+        ax.axhline(P["area_basal_px2"], color="gray",
+                   linestyle=":", label="Area basal")
+
+    ax.set_xlabel("Tiempo (s)")
+    ax.set_ylabel("Area pupilar (px²)")
+    ax.set_title(f"Respuesta pupilar al estimulo luminoso - {nombre}")
+    ax.legend()
+    ax.grid(alpha=0.3)
+
+    plt.tight_layout()
+    cerrar_figura(fig, f"parametros_{nombre}", mostrar)
+
+
+def estado_texto(P):
+    c, r = P["estado_constriccion"], P["estado_redilatacion"]
+
+    partes = []
+
+    if not c.startswith("No aplica"):
+        partes.append(f"Constriccion: {c}")
+
+    if not r.startswith("No aplica"):
+        partes.append(f"Redilatacion: {r}")
+
+    return " | ".join(partes) if partes else "Sin transiciones de luz detectadas"
+
+
+def fila_resumen(nombre_archivo, P):
+    """Fila corta y redondeada: es el formato fijo de salida."""
+
+    def r(valor, dec):
+        return round(float(valor), dec) if np.isfinite(valor) else np.nan
+
+    return {
+        "video": nombre_archivo,
+        "tipo_registro": P["tipo_registro"],
+        "encendido_s": r(P["tiempo_estimulo_s"], 3),
+        "apagado_s": r(P["tiempo_apagado_s"], 3),
+        "area_basal_px2": r(P["area_basal_px2"], 1),
+        "area_minima_px2": r(P["area_minima_px2"], 1),
+        "latencia_s": r(P["latencia_s"], 3),
+        "amplitud_px2": r(P["amplitud_px2"], 1),
+        "amplitud_pct": r(P["amplitud_pct"], 1),
+        "vel_constriccion_px2_s": r(P["velocidad_constriccion_px2_s"], 1),
+        "vel_redilatacion_px2_s": r(P["velocidad_redilatacion_px2_s"], 1),
+        "estado": estado_texto(P)
+    }
+
+
+def imprimir_resumen_registro(fila):
+
+    campos = [
+        ("tipo_registro", "Tipo de registro", ""),
+        ("encendido_s", "Encendido de la luz", "s"),
+        ("apagado_s", "Apagado de la luz", "s"),
+        ("latencia_s", "Latencia", "s"),
+        ("amplitud_px2", "Amplitud de constriccion", "px²"),
+        ("amplitud_pct", "Amplitud de constriccion", "% del basal"),
+        ("vel_constriccion_px2_s", "Velocidad de constriccion", "px²/s"),
+        ("vel_redilatacion_px2_s", "Velocidad de redilatacion", "px²/s"),
+        ("estado", "Estado", "")
+    ]
+
+    filas = []
+
+    for clave, nombre_campo, unidad in campos:
+
+        valor = fila[clave]
+
+        if isinstance(valor, float) and not np.isfinite(valor):
+            valor = "-"
+
+        filas.append({"Parametro": nombre_campo, "Valor": valor, "Unidad": unidad})
+
+    print(pd.DataFrame(filas).to_string(index=False))
+
+
+def tabla_variabilidad(resumen):
+    """Media ± desvio entre registros, separado por tipo A / B.
+    Las latencias marcadas para revision (< 0.1 s) no entran en el promedio."""
+
+    parametros = [
+        ("latencia_s", "Latencia (s)", 3),
+        ("amplitud_px2", "Amplitud (px²)", 1),
+        ("amplitud_pct", "Amplitud (% del basal)", 1),
+        ("vel_constriccion_px2_s", "Vel. constriccion (px²/s)", 1),
+        ("vel_redilatacion_px2_s", "Vel. redilatacion (px²/s)", 1)
+    ]
+
+    filas = []
+
+    for clave, etiqueta, dec in parametros:
+
+        fila = {"Parametro": etiqueta}
+
+        for tipo in ("A", "B"):
+
+            seleccion = resumen["tipo_registro"] == tipo
+
+            if clave == "latencia_s":
+                seleccion = seleccion & ~resumen["estado"].astype(str).str.contains("revisar")
+
+            v = pd.to_numeric(resumen.loc[seleccion, clave], errors="coerce").dropna()
+
+            if len(v) == 0:
+                fila[f"Registro {tipo}"] = "-"
+            elif len(v) == 1:
+                fila[f"Registro {tipo}"] = f"{v.iloc[0]:.{dec}f} (n=1)"
+            else:
+                fila[f"Registro {tipo}"] = (
+                    f"{v.mean():.{dec}f} ± {v.std(ddof=1):.{dec}f} (n={len(v)})"
+                )
+
+        filas.append(fila)
+
+    return pd.DataFrame(filas)
+
+# ------------------------------------------------------------
+# 3.1 DESCRIPTORES MORFOMETRICOS Y DE TEXTURA (frame segmentado)
+# ------------------------------------------------------------
+
+def analizar_frame_segmentado(roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion):
+    """3.1: descriptores de forma y texturas (1er y 2do orden) de la pupila
+    y de un anillo aproximado de iris, sobre la ROI segmentada del Modulo 2."""
 
     # MODULO 3: Extraccion de caracteristicas y dinamica temporal
 
@@ -246,7 +2328,7 @@ def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, 
     tabla_primer_orden_pupila.index.name = "Canal RGB"
 
     print("\n--- 3.1.2 Textura de primer orden: pupila ---")
-    print(tabla_primer_orden_pupila.round(4).to_string())
+    display(tabla_primer_orden_pupila.round(4))
 
 
     # Histogramas RGB de la pupila
@@ -455,7 +2537,7 @@ def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, 
     tabla_glcm_pupila = pd.DataFrame(resultados_glcm_pupila)
 
     print("\n--- 3.1.3 Textura de segundo orden: GLCM pupilar ---")
-    print(tabla_glcm_pupila.round(4).to_string(index=False))
+    display(tabla_glcm_pupila.round(4))
 
 
     # Visualizacion de la GLCM a 0 grados
@@ -607,7 +2689,7 @@ def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, 
     tabla_primer_orden.index.name = "Canal RGB"
 
     print("\n--- 3.1.4 Textura de primer orden del iris ---")
-    print(tabla_primer_orden.round(4).to_string())
+    display(tabla_primer_orden.round(4))
 
 
     # Textura de segundo orden del iris por canal RGB
@@ -689,7 +2771,7 @@ def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, 
     tabla_segundo_orden.index.name = "Canal RGB"
 
     print("\n--- 3.1.4 Textura de segundo orden del iris (GLCM) ---")
-    print(tabla_segundo_orden.round(4).to_string())
+    display(tabla_segundo_orden.round(4))
 
 
     # Comparacion grafica del contraste GLCM entre canales RGB
@@ -708,1878 +2790,348 @@ def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion, 
     plt.tight_layout()
     plt.show()
 
-    # MODULO 3.2: Procesamiento temporal de la pupila
+    # 3.1.3 / 3.1.4 Conclusion: que canal aporta mayor riqueza textural
 
-    # 3.2.1 Automatizacion de la segmentacion en video
+    print("\n--- Conclusion de textura: comparacion entre canales RGB ---")
 
-    # Estrategia:
-    # 1. Estimar una "semilla" (centro y radio tipicos de la pupila) usando
-    #    varios frames repartidos en todo el video y quedandose con el consenso.
-    #    Sabemos que, como la cabeza esta fija, la pupila siempre esta cerca de la semilla.
-    # 2. En cada frame, detectar un centro/radio candidato dentro de esa zona
-    #    (oscuro, uniforme y rodeado de intensidades mas claras).
-    # 3. Segmentar la pupila con el MEJOR METODO elegido en el Modulo 2
-    #    (mejor_metodo, segun Dice contra la referencia manual).
-    # 4. Refinar con la MEJOR OPERACION MORFOLOGICA del Modulo 2
-    #    (mejor_operacion) y con la envolvente convexa (la pupila es convexa).
-    # 5. Seguir el centro entre frames y descartar saltos imposibles.
+    metricas_conclusion = tabla_segundo_orden[
+        ["Contraste", "Entropia", "Energia", "Homogeneidad"]
+    ].copy()
 
+    metricas_conclusion["Desvio (1er orden)"] = (
+        tabla_primer_orden["Desvio estandar"]
+    )
 
+    display(metricas_conclusion.round(4))
 
-    if not mejor_metodo or not mejor_operacion:
-        raise ValueError("Se requiere el metodo y la morfologia elegidos en el Modulo 2")
+    # Criterio: MAS textura = mas contraste, mas entropia, mas desvio,
+    # y MENOS homogeneidad y energia (la imagen es menos uniforme).
+    puntaje_textura = (
+        metricas_conclusion["Contraste"].rank()
+        + metricas_conclusion["Entropia"].rank()
+        + metricas_conclusion["Desvio (1er orden)"].rank()
+        + (-metricas_conclusion["Homogeneidad"]).rank()
+        + (-metricas_conclusion["Energia"]).rank()
+    )
 
-    # Si se quiere forzar otro metodo manualmente, cambiar estas dos lineas
-    # (opciones: "Otsu", "K-Means K=2".."K-Means K=5", "Snakes", "Watershed")
-    METODO_VIDEO = mejor_metodo
-    OPERACION_VIDEO = mejor_operacion
+    canal_mas_rico = puntaje_textura.idxmax()
 
-    print(f"Metodo de segmentacion para el video: {METODO_VIDEO}")
-    print(f"Operacion morfologica para el video: {OPERACION_VIDEO}")
+    print(f"Mayor contraste:         canal {metricas_conclusion['Contraste'].idxmax()}")
+    print(f"Mayor entropia (GLCM):   canal {metricas_conclusion['Entropia'].idxmax()}")
+    print(f"Mayor desvio (1er ord.): canal {metricas_conclusion['Desvio (1er orden)'].idxmax()}")
+    print(f"Menor homogeneidad:      canal {metricas_conclusion['Homogeneidad'].idxmin()}")
+    print(f"Menor energia:           canal {metricas_conclusion['Energia'].idxmin()}")
+    print(f"\n=> Canal con mayor riqueza textural (ranking combinado): {canal_mas_rico}")
+    print(
+        "Nota: la 'region iris' es un anillo aproximado "
+        "(1.15 a 1.65 radios pupilares alrededor del centroide), "
+        "no un iris segmentado. Puede incluir esclerotica, parpado o "
+        "pestanas, asi que la conclusion es indicativa y depende del "
+        "color de ojo y de la iluminacion del registro."
+    )
 
-    carpeta_resultados = CARPETA_PROYECTO / "resultados"
-    carpeta_resultados.mkdir(parents=True, exist_ok=True)
+    # Grafico comparativo de las cuatro metricas por canal
+    fig, ax = plt.subplots(1, 4, figsize=(14, 3.5))
 
-    nombre_video = Path(VIDEO_PATH).stem
-
-
-    # PARAMETROS (todos relativos al tamano del frame o de la pupila,
-    # no a pixeles absolutos de una imagen en particular)
-    #Estos parámetros son valores que configuramos para que el algoritmo pueda encontrar y seguir la pupila automáticamente en el video.
-
-
-    # Ancho al que se reduce el frame solo para localizar el centro
-    ANCHO_DETECCION = 420
-
-    # Zona amplia (fracciones del frame: xmin, xmax, ymin, ymax) donde se busca
-    # la semilla. Es solo para arrancar: despues se usa la zona de la semilla.
-    ZONA_BUSQUEDA = (0.10, 0.90, 0.15, 0.85)
-
-    # Rango de radios pupilares posibles, como fraccion del ancho del frame
-    RADIO_MIN_REL = 0.012
-    RADIO_MAX_REL = 0.08
-
-    # Puntaje minimo del detector (contraste relativo, sin unidades)
-    PUNTAJE_MINIMO = 0.20
-
-    # Cuanto se penaliza que el disco candidato no sea uniforme
-    PESO_UNIFORMIDAD = 0.5
-
-    # Frames usados para estimar la semilla
-    N_MUESTRAS_SEMILLA = 15
-
-    # Tamano de la zona de seguimiento alrededor de la semilla (en radios)
-    FACTOR_ZONA_SEGUIMIENTO = 3.0
-
-    # Rango de radios permitido respecto del radio de la semilla
-    RELACION_RADIO_SEMILLA = (0.5, 1.9)
-
-    # La segmentacion local se limita a un disco de este tamano (en radios)
-    FACTOR_DISCO_LOCAL = 1.8
-
-    # Controles de calidad
-    CIRCULARIDAD_MIN = 0.55
-    RELACION_AREA_MAX = 1.60          # cambio maximo de area entre frames
-    DESPLAZAMIENTO_MAX_REL = 1.0      # desplazamiento maximo (en radios)
-
-
-    # A. Detectar posibles centros pupilares
-
-    def detectar_centro_pupila(gris, zona, rango_radios, n_radios=6):
-        """
-        Busca un disco oscuro, uniforme y rodeado de un anillo mas claro.
-
-        zona: (xmin, xmax, ymin, ymax) en pixeles del frame original.
-        rango_radios: (rmin, rmax) en pixeles del frame original.
-        """
-
-        alto_original, ancho_original = gris.shape
-
-        # Reducir la resolucion solo para localizar el centro
-        escala = min(1.0, ANCHO_DETECCION / ancho_original)
-
-        ancho = max(1, int(round(ancho_original * escala)))
-        alto = max(1, int(round(alto_original * escala)))
-
-        imagen = cv2.resize(
-            gris,
-            (ancho, alto),
-            interpolation=cv2.INTER_AREA
+    for a, metrica in zip(
+        ax, ["Contraste", "Entropia", "Homogeneidad", "Energia"]
+    ):
+        a.bar(
+            nombres_canales,
+            metricas_conclusion.loc[nombres_canales, metrica],
+            color=["tab:red", "tab:green", "tab:blue"]
         )
+        a.set_title(metrica)
+        a.set_xlabel("Canal RGB")
 
-        imagen = cv2.GaussianBlur(
-            imagen,
-            (3, 3),
-            0
-        ).astype(np.float32)
-
-        imagen_cuadrado = imagen ** 2
-
-        # Zona de busqueda en la imagen reducida
-        xmin = int(max(0, zona[0] * escala))
-        xmax = int(min(ancho, zona[1] * escala))
-
-        ymin = int(max(0, zona[2] * escala))
-        ymax = int(min(alto, zona[3] * escala))
-
-        if xmax <= xmin or ymax <= ymin:
-            return None
-
-        Y, X = np.ogrid[:alto, :ancho]
-
-        zona_busqueda = (
-            (X >= xmin) &
-            (X < xmax) &
-            (Y >= ymin) &
-            (Y < ymax)
-        )
-
-        # Radios a evaluar (en la imagen reducida)
-        rmin = max(3, int(round(rango_radios[0] * escala)))
-        rmax = max(rmin, int(round(rango_radios[1] * escala)))
-
-        radios = np.unique(
-            np.round(np.linspace(rmin, rmax, n_radios)).astype(int)
-        )
-
-        mejor = None
-        mejor_puntaje = -np.inf
-
-        for radio in radios:
-
-            # Discos y anillos de referencia
-            radio_externo = int(np.ceil(1.8 * radio))
-
-            coordenadas = np.arange(
-                -radio_externo,
-                radio_externo + 1
-            )
-
-            yy, xx = np.meshgrid(
-                coordenadas,
-                coordenadas,
-                indexing="ij"
-            )
-
-            dist = np.sqrt(xx**2 + yy**2)
-
-            disco = (dist <= radio).astype(np.float32)
-
-            anillo = (
-                (dist >= 1.2 * radio) &
-                (dist <= 1.8 * radio)
-            ).astype(np.float32)
-
-            disco /= disco.sum()
-            anillo /= anillo.sum()
-
-            # Media del disco, media del cuadrado (para el desvio) y media del anillo
-            media_disco = cv2.filter2D(imagen, -1, disco)
-            media_disco_2 = cv2.filter2D(imagen_cuadrado, -1, disco)
-            media_anillo = cv2.filter2D(imagen, -1, anillo)
-
-            desvio_disco = np.sqrt(
-                np.maximum(media_disco_2 - media_disco**2, 0)
-            )
-
-            # Contraste RELATIVO: no depende de la exposicion del frame.
-            # (+10 evita dividir por casi cero en frames muy oscuros)
-            referencia = media_anillo + 10.0
-
-            contraste_relativo = (media_anillo - media_disco) / referencia
-
-            # Se penaliza un disco poco uniforme (pestanas, sombras, bordes)
-            puntaje_mapa = (
-                contraste_relativo
-                - PESO_UNIFORMIDAD * desvio_disco / referencia
-            )
-
-            # No evaluar circulos que se salgan del frame
-            margen_valido = radio_externo + 1
-
-            zona_valida = zona_busqueda.copy()
-
-            zona_valida[:margen_valido, :] = False
-            zona_valida[-margen_valido:, :] = False
-            zona_valida[:, :margen_valido] = False
-            zona_valida[:, -margen_valido:] = False
-
-            if not np.any(zona_valida):
-                continue
-
-            puntajes = np.where(
-                zona_valida,
-                puntaje_mapa,
-                -np.inf
-            )
-
-            indice = np.unravel_index(
-                np.argmax(puntajes),
-                puntajes.shape
-            )
-
-            puntaje = float(puntajes[indice])
-
-            if puntaje > mejor_puntaje:
-
-                mejor_puntaje = puntaje
-
-                mejor = {
-                    "cx": float(indice[1] / escala),
-                    "cy": float(indice[0] / escala),
-                    "radio": float(radio / escala),
-                    "puntaje": puntaje
-                }
-
-        if mejor is None:
-            return None
-
-        if mejor_puntaje < PUNTAJE_MINIMO:
-            return None
-
-        return mejor
+    plt.suptitle("Textura GLCM del iris (anillo aproximado) por canal")
+    plt.tight_layout()
+    plt.show()
 
 
-    # A.2 Estimar la semilla usando varios frames del video
+# ------------------------------------------------------------
+# 3.2 PROCESAMIENTO EN VIDEO (de punta a punta, sin intervencion)
+# ------------------------------------------------------------
 
-    def estimar_semilla(ruta_video, n_muestras=N_MUESTRAS_SEMILLA):
+def procesar_registros(video_path, carpeta_resultados, metodo, operacion,
+                       modo="desarrollo", procesar_otros=None, mostrar_figuras=None):
+    """
+    Procesa video_path: curva de area/diametro frame a frame, parametros
+    fisiologicos, tablas y graficos. En modo "desarrollo" tambien procesa
+    los otros videos de la misma carpeta (variabilidad entre registros).
 
-        cap = cv2.VideoCapture(str(ruta_video))
+    Devuelve (resumen, variabilidad): dos DataFrames.
+    """
 
-        if not cap.isOpened():
-            raise ValueError(f"No se pudo abrir {ruta_video}")
+    video_path = Path(video_path)
+    carpeta_resultados = Path(carpeta_resultados)
 
-        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if not video_path.is_file():
+        raise FileNotFoundError(f"No se encontro el video: {video_path}")
 
-        indices = np.linspace(
-            0,
-            max(total - 1, 0),
-            n_muestras,
-            dtype=int
-        )
+    if procesar_otros is None:
+        procesar_otros = (modo == "desarrollo")
 
-        candidatos = []
-        alto_v, ancho_v = None, None
+    if mostrar_figuras is None:
+        mostrar_figuras = (modo == "desarrollo")
 
-        for idx in indices:
+    configurar(metodo, operacion, carpeta_resultados, mostrar_figuras)
 
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+    print(f"Metodo de segmentacion para el video: {metodo}")
+    print(f"Operacion morfologica para el video: {operacion}")
 
-            ok, fr = cap.read()
-
-            if not ok:
-                continue
-
-            g = cv2.cvtColor(fr, cv2.COLOR_BGR2GRAY)
-
-            alto_v, ancho_v = g.shape
-
-            zona = (
-                ZONA_BUSQUEDA[0] * ancho_v,
-                ZONA_BUSQUEDA[1] * ancho_v,
-                ZONA_BUSQUEDA[2] * alto_v,
-                ZONA_BUSQUEDA[3] * alto_v
-            )
-
-            rango = (
-                RADIO_MIN_REL * ancho_v,
-                RADIO_MAX_REL * ancho_v
-            )
-
-            c = detectar_centro_pupila(g, zona, rango, n_radios=8)
-
-            if c is not None:
-                candidatos.append(c)
-
-        cap.release()
-
-        if len(candidatos) < 3:
-            raise ValueError(
-                "No se pudo estimar la semilla de la pupila: "
-                "muy pocas detecciones. Revisar ZONA_BUSQUEDA, "
-                "PUNTAJE_MINIMO o la calidad del video."
-            )
-
-        cxs = np.array([c["cx"] for c in candidatos])
-        cys = np.array([c["cy"] for c in candidatos])
-        rs = np.array([c["radio"] for c in candidatos])
-
-        # Consenso: descartar candidatos lejos de la mediana
-        mediana_x = np.median(cxs)
-        mediana_y = np.median(cys)
-        mediana_r = np.median(rs)
-
-        cerca = np.hypot(cxs - mediana_x, cys - mediana_y) <= mediana_r
-
-        if cerca.sum() < 3:
-            raise ValueError(
-                "Las detecciones de la semilla no son consistentes entre frames. "
-                "Revisar ZONA_BUSQUEDA o PUNTAJE_MINIMO."
-            )
-
-        return {
-            "cx": float(np.median(cxs[cerca])),
-            "cy": float(np.median(cys[cerca])),
-            "radio": float(np.median(rs[cerca])),
-            "ancho": ancho_v,
-            "alto": alto_v,
-            "n_validas": int(cerca.sum()),
-            "n_muestras": len(indices)
-        }
-
-
-    SEMILLA = estimar_semilla(VIDEO_PATH)
+    semilla_principal = estimar_semilla(video_path)
 
     print("\n--- Semilla de la pupila ---")
-    print(f"Centro: ({SEMILLA['cx']:.1f}, {SEMILLA['cy']:.1f}) px")
-    print(f"Radio: {SEMILLA['radio']:.1f} px")
+    print(f"Centro: ({semilla_principal['cx']:.1f}, {semilla_principal['cy']:.1f}) px")
+    print(f"Radio: {semilla_principal['radio']:.1f} px")
     print(
-        f"Frames consistentes: {SEMILLA['n_validas']} "
-        f"de {SEMILLA['n_muestras']}"
-    )
-
-    # Zona de seguimiento: la cabeza esta fija, la pupila no se va lejos
-    _m = FACTOR_ZONA_SEGUIMIENTO * SEMILLA["radio"]
-
-    ZONA_SEGUIMIENTO = (
-        max(0.0, SEMILLA["cx"] - _m),
-        min(float(SEMILLA["ancho"]), SEMILLA["cx"] + _m),
-        max(0.0, SEMILLA["cy"] - _m),
-        min(float(SEMILLA["alto"]), SEMILLA["cy"] + _m)
-    )
-
-    _rmin = max(
-        RADIO_MIN_REL * SEMILLA["ancho"],
-        RELACION_RADIO_SEMILLA[0] * SEMILLA["radio"]
-    )
-
-    _rmax = min(
-        RADIO_MAX_REL * SEMILLA["ancho"],
-        RELACION_RADIO_SEMILLA[1] * SEMILLA["radio"]
-    )
-
-    if _rmin >= _rmax:
-        _rmin, _rmax = 0.7 * SEMILLA["radio"], 1.4 * SEMILLA["radio"]
-
-    RANGO_RADIOS_SEMILLA = (_rmin, _rmax)
-
-
-    # B. Segmentar la pupila con el metodo elegido en el Modulo 2
-
-    # Funciones locales (trabajan sobre la ROI recortada alrededor
-    # del candidato), una por cada metodo del apartado 2.1.
-    # Todas devuelven una mascara uint8 (0/255) del tamano de la ROI local,
-    # o None si no pudieron segmentar.
-    # zona_disco: booleana, limita el analisis a un entorno de la pupila.
-
-    def quitar_reflejos(roi_local, zona_disco, radio):
-        """Rellena (inpainting) los reflejos puntuales del flash.
-
-        Un reflejo dentro de la pupila crea un borde muy fuerte que atrae a
-        Snakes/Watershed y deja agujeros en Otsu/K-Means. Se detectan como
-        manchas pequenas entre los pixeles mas brillantes del entorno de la
-        pupila y se rellenan con el valor de sus vecinos.
-        """
-
-        valores = roi_local[zona_disco]
-
-        if valores.size < 50:
-            return roi_local
-
-        umbral = np.percentile(valores, 98)
-
-        brillantes = (
-            (roi_local >= umbral) & zona_disco
-        ).astype(np.uint8)
-
-        cantidad, etiquetas_b, estadisticas_b, _ = (
-            cv2.connectedComponentsWithStats(brillantes, 8)
-        )
-
-        # Solo manchas chicas: una region grande no es un reflejo
-        # (es esclerotica, parpado, etc.)
-        area_maxima = 0.08 * np.pi * radio**2
-
-        reflejos = np.zeros(roi_local.shape, dtype=np.uint8)
-
-        for i in range(1, cantidad):
-            if estadisticas_b[i, cv2.CC_STAT_AREA] <= area_maxima:
-                reflejos[etiquetas_b == i] = 255
-
-        if not np.any(reflejos):
-            return roi_local
-
-        reflejos = cv2.dilate(
-            reflejos,
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        )
-
-        return cv2.inpaint(roi_local, reflejos, 3, cv2.INPAINT_TELEA)
-
-
-    def elegir_componente_central(binaria, cx, cy):
-        """De una mascara binaria, se queda con la componente conectada
-        que contiene al centro candidato (o la mas cercana a el)."""
-
-        binaria = (binaria > 0).astype(np.uint8)
-
-        cantidad, etiquetas_cc, _, centroides_cc = (
-            cv2.connectedComponentsWithStats(binaria, 8)
-        )
-
-        if cantidad <= 1:
-            return None
-
-        xi = int(round(cx))
-        yi = int(round(cy))
-
-        if (
-            0 <= yi < etiquetas_cc.shape[0] and
-            0 <= xi < etiquetas_cc.shape[1] and
-            etiquetas_cc[yi, xi] > 0
-        ):
-            elegido = etiquetas_cc[yi, xi]
-
-        else:
-            elegido = min(
-                range(1, cantidad),
-                key=lambda i: np.hypot(
-                    centroides_cc[i][0] - cx,
-                    centroides_cc[i][1] - cy
-                )
-            )
-
-        return (etiquetas_cc == elegido).astype(np.uint8) * 255
-
-
-    def segmentar_otsu_local(roi_local, cx, cy, zona_disco):
-
-        # Otsu calculado solo con los pixeles del entorno de la pupila
-        # (pupila + iris), para que el umbral separe pupila de iris
-        # y no iris de esclerotica.
-        valores = roi_local[zona_disco].reshape(-1, 1)
-
-        if valores.shape[0] < 20:
-            return None
-
-        umbral_local, _ = cv2.threshold(
-            valores,
-            0,
-            255,
-            cv2.THRESH_BINARY + cv2.THRESH_OTSU
-        )
-
-        binaria = (
-            (roi_local <= umbral_local) & zona_disco
-        ).astype(np.uint8) * 255
-
-        return elegir_componente_central(binaria, cx, cy)
-
-
-    def segmentar_kmeans_local(roi_local, cx, cy, k, zona_disco):
-
-        # K-Means solo con los pixeles del entorno de la pupila
-        pix = roi_local[zona_disco].reshape(-1, 1).astype(np.float32)
-
-        if pix.shape[0] < 10 * k:
-            return None
-
-        criterio_local = (
-            cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER,
-            100,
-            0.2
-        )
-
-        _, etiq, centros_k = cv2.kmeans(
-            pix,
-            k,
-            None,
-            criterio_local,
-            3,
-            cv2.KMEANS_PP_CENTERS
-        )
-
-        grupo_oscuro_local = np.argmin(centros_k.flatten())
-
-        binaria = np.zeros(roi_local.shape, dtype=np.uint8)
-
-        binaria[zona_disco] = (
-            (etiq.flatten() == grupo_oscuro_local).astype(np.uint8) * 255
-        )
-
-        return elegir_componente_central(binaria, cx, cy)
-
-
-    def segmentar_snake_local(roi_local, cx, cy, radio, zona_disco):
-
-        # Circulo inicial alrededor de la pupila y contorno activo
-        # sobre la imagen suavizada.
-
-        # IMPORTANTE: la fuerza de borde de Snakes depende del contraste
-        # absoluto de la imagen. En frames oscuros (antes del estimulo o
-        # al apagar la luz) el contraste es bajo y las fuerzas internas
-        # (alpha, beta) colapsan el contorno. Se normaliza el contraste
-        # local a [0, 1] usando los pixeles del entorno de la pupila.
-        valores_disco = roi_local[zona_disco].astype(float)
-
-        p_bajo = np.percentile(valores_disco, 1)
-        p_alto = np.percentile(valores_disco, 99)
-
-        roi_normalizada = np.clip(
-            (roi_local.astype(float) - p_bajo) / max(p_alto - p_bajo, 1.0),
-            0,
-            1
-        )
-
-        img = gaussian(
-            roi_normalizada,
-            sigma=1
-        )
-
-        radio_ini = 1.5 * radio
-
-        ang = np.linspace(0, 2 * np.pi, 120, endpoint=False)
-
-        filas = np.clip(
-            cy + radio_ini * np.sin(ang),
-            0,
-            roi_local.shape[0] - 1
-        )
-
-        columnas = np.clip(
-            cx + radio_ini * np.cos(ang),
-            0,
-            roi_local.shape[1] - 1
-        )
-
-        inicial = np.array([filas, columnas]).T
-
-        final = active_contour(
-            img,
-            inicial,
-            alpha=0.015,
-            beta=10,
-            gamma=0.001,
-            w_line=0,
-            w_edge=1,
-            max_num_iter=500,   # menos iteraciones que en 2.1.3 (el video tiene muchos frames)
-            boundary_condition="periodic"
-        )
-
-        puntos = np.round(final[:, ::-1]).astype(np.int32)
-
-        mascara_s = np.zeros(roi_local.shape, dtype=np.uint8)
-
-        cv2.fillPoly(mascara_s, [puntos], 255)
-
-        return mascara_s
-
-
-    def segmentar_watershed_local(roi_local, cx, cy, radio, zona_disco):
-
-        # Watershed sobre el gradiente de Sobel con marcadores
-        # (interior seguro de la pupila / exterior)
-        imagen_normalizada = (
-            roi_local.astype(np.float64) / 255.0
-        )
-
-        gradiente = sobel(imagen_normalizada)
-
-        Yl, Xl = np.ogrid[:roi_local.shape[0], :roi_local.shape[1]]
-
-        distancia_l = np.sqrt(
-            (Xl - cx)**2 +
-            (Yl - cy)**2
-        )
-
-        # Marcadores:
-        # 1 = interior seguro de la pupila
-        # 2 = region exterior
-        marcadores_l = np.zeros(roi_local.shape, dtype=np.int32)
-
-        marcadores_l[distancia_l <= 0.30 * radio] = 1
-        marcadores_l[distancia_l >= 1.65 * radio] = 2
-
-        if not np.any(marcadores_l == 1):
-            return None
-
-        if not np.any(marcadores_l == 2):
-            return None
-
-        etiquetas_l = watershed(
-            gradiente,
-            markers=marcadores_l,
-            watershed_line=True
-        )
-
-        return (etiquetas_l == 1).astype(np.uint8) * 255
-
-
-    def aplicar_morfologia(mascara, operacion):
-
-        # Mismo elemento estructurante que en 2.2.1
-        kernel_v = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (3, 3)
-        )
-
-        if operacion == "Erosion":
-            return cv2.erode(mascara, kernel_v, iterations=1)
-
-        if operacion == "Dilatacion":
-            return cv2.dilate(mascara, kernel_v, iterations=1)
-
-        if operacion == "Apertura":
-            return cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel_v)
-
-        if operacion == "Cierre":
-            return cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel_v)
-
-        # "Sin morfologia"
-        return mascara.copy()
-
-
-    # Registro de por que se descartan frames (para diagnosticar)
-    from collections import Counter
-
-    MOTIVOS_RECHAZO = Counter()
-
-
-    def rechazar(motivo):
-        MOTIVOS_RECHAZO[motivo] += 1
-        return None
-
-
-    def segmentar_pupila(gris, candidato):
-
-        alto_frame, ancho_frame = gris.shape
-
-        cx = candidato["cx"]
-        cy = candidato["cy"]
-        radio = candidato["radio"]
-
-        # Extraer una ROI local alrededor del candidato
-        margen = max(12, int(np.ceil(2.4 * radio)))
-
-        x1 = max(0, int(cx - margen))
-        x2 = min(ancho_frame, int(cx + margen + 1))
-
-        y1 = max(0, int(cy - margen))
-        y2 = min(alto_frame, int(cy + margen + 1))
-
-        roi = gris[y1:y2, x1:x2].copy()
-
-        if roi.size == 0:
-            return rechazar("roi_vacia")
-
-        cx_local = cx - x1
-        cy_local = cy - y1
-
-        # Entorno de la pupila (proporcional al radio candidato)
-        Yl, Xl = np.ogrid[:roi.shape[0], :roi.shape[1]]
-
-        zona_disco = (
-            (Xl - cx_local)**2 + (Yl - cy_local)**2
-        ) <= (FACTOR_DISCO_LOCAL * radio)**2
-
-        # Quitar reflejos del flash antes de segmentar
-        roi = quitar_reflejos(roi, zona_disco, radio)
-
-        # Se usa el metodo elegido en el Modulo 2
-        if METODO_VIDEO == "Otsu":
-            mascara = segmentar_otsu_local(
-                roi, cx_local, cy_local, zona_disco
-            )
-
-        elif METODO_VIDEO.startswith("K-Means"):
-            k_video = int(METODO_VIDEO.split("=")[1])
-            mascara = segmentar_kmeans_local(
-                roi, cx_local, cy_local, k_video, zona_disco
-            )
-
-        elif METODO_VIDEO == "Snakes":
-            mascara = segmentar_snake_local(
-                roi, cx_local, cy_local, radio, zona_disco
-            )
-
-        elif METODO_VIDEO == "Watershed":
-            mascara = segmentar_watershed_local(
-                roi, cx_local, cy_local, radio, zona_disco
-            )
-
-        else:
-            raise ValueError(f"Metodo de segmentacion desconocido: {METODO_VIDEO}")
-
-        if mascara is None:
-            return rechazar("metodo_sin_mascara")
-
-        # Operacion morfologica elegida en el Modulo 2
-        mascara = aplicar_morfologia(mascara, OPERACION_VIDEO)
-
-        # La mascara no puede salirse del entorno de la pupila
-        mascara = cv2.bitwise_and(
-            mascara,
-            zona_disco.astype(np.uint8) * 255
-        )
-
-        # Conservar el contorno principal
-        contornos, _ = cv2.findContours(
-            mascara,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
-
-        if not contornos:
-            return rechazar("sin_contorno")
-
-        contorno = max(
-            contornos,
-            key=cv2.contourArea
-        )
-
-        # Envolvente convexa: la pupila es convexa, asi que se rellenan
-        # muescas producidas por reflejos del flash o pestanas.
-        contorno = cv2.convexHull(contorno)
-
-        mascara_limpia = np.zeros_like(mascara)
-
-        cv2.drawContours(
-            mascara_limpia,
-            [contorno],
-            -1,
-            255,
-            cv2.FILLED
-        )
-
-        # Controles de calidad
-        area = int(np.count_nonzero(mascara_limpia))
-
-        area_circulo = np.pi * radio**2
-
-        if not (0.35 * area_circulo <= area <= 2.50 * area_circulo):
-            return rechazar("area_fuera_de_rango")
-
-        # Rechazar segmentaciones cortadas por los bordes
-        if (
-            np.any(mascara_limpia[0, :]) or
-            np.any(mascara_limpia[-1, :]) or
-            np.any(mascara_limpia[:, 0]) or
-            np.any(mascara_limpia[:, -1])
-        ):
-            return rechazar("toca_borde")
-
-        perimetro = cv2.arcLength(contorno, True)
-
-        if perimetro <= 0:
-            return rechazar("perimetro_cero")
-
-        circularidad = 4 * np.pi * area / perimetro**2
-
-        if not (CIRCULARIDAD_MIN <= circularidad <= 1.20):
-            return rechazar("circularidad")
-
-        momentos = cv2.moments(
-            mascara_limpia,
-            binaryImage=True
-        )
-
-        if momentos["m00"] == 0:
-            return rechazar("momento_cero")
-
-        centro_final_x = (
-            x1 + momentos["m10"] / momentos["m00"]
-        )
-
-        centro_final_y = (
-            y1 + momentos["m01"] / momentos["m00"]
-        )
-
-        # El centro segmentado debe coincidir con el candidato
-        if np.hypot(
-            centro_final_x - cx,
-            centro_final_y - cy
-        ) > 0.60 * radio:
-            return rechazar("centro_desplazado")
-
-        diametro = 2 * np.sqrt(area / np.pi)
-
-        # Mascara en coordenadas del frame completo
-        mascara_frame = np.zeros_like(gris, dtype=np.uint8)
-
-        mascara_frame[y1:y2, x1:x2] = mascara_limpia
-
-        return {
-            "mascara": mascara_frame,
-            "area": float(area),
-            "diametro": float(diametro),
-            "cx": float(centro_final_x),
-            "cy": float(centro_final_y),
-            "radio": float(diametro / 2),
-            "circularidad": float(circularidad),
-            "puntaje": float(candidato["puntaje"])
-        }
-
-
-    # C. Procesar un frame con seguimiento temporal
-
-    def procesar_frame_pupila(gris, anterior=None):
-        """Devuelve (resultado, candidato). Cualquiera puede ser None."""
-
-        if anterior is None:
-
-            # Busqueda en toda la zona de seguimiento
-            zona = ZONA_SEGUIMIENTO
-            rango = RANGO_RADIOS_SEMILLA
-            n_radios = 6
-
-        else:
-
-            # Seguimiento local alrededor de la ultima deteccion,
-            # sin salirse de la zona de la semilla
-            m = 2.0 * anterior["radio"]
-
-            zona = (
-                max(ZONA_SEGUIMIENTO[0], anterior["cx"] - m),
-                min(ZONA_SEGUIMIENTO[1], anterior["cx"] + m),
-                max(ZONA_SEGUIMIENTO[2], anterior["cy"] - m),
-                min(ZONA_SEGUIMIENTO[3], anterior["cy"] + m)
-            )
-
-            rango = (
-                max(RANGO_RADIOS_SEMILLA[0], 0.70 * anterior["radio"]),
-                min(RANGO_RADIOS_SEMILLA[1], 1.40 * anterior["radio"])
-            )
-
-            if rango[0] >= rango[1]:
-                rango = RANGO_RADIOS_SEMILLA
-
-            n_radios = 4
-
-        candidato = detectar_centro_pupila(
-            gris,
-            zona,
-            rango,
-            n_radios=n_radios
-        )
-
-        if candidato is None:
-            MOTIVOS_RECHAZO["sin_candidato"] += 1
-            return None, None
-
-        resultado = segmentar_pupila(gris, candidato)
-
-        if resultado is None:
-            return None, candidato
-
-        if anterior is not None:
-
-            relacion_area = resultado["area"] / anterior["area"]
-
-            # Rechazar variaciones excesivas entre frames
-            if not (
-                1.0 / RELACION_AREA_MAX <= relacion_area <= RELACION_AREA_MAX
-            ):
-                MOTIVOS_RECHAZO["salto_de_area_entre_frames"] += 1
-                return None, candidato
-
-            desplazamiento = np.hypot(
-                resultado["cx"] - anterior["cx"],
-                resultado["cy"] - anterior["cy"]
-            )
-
-            if desplazamiento > DESPLAZAMIENTO_MAX_REL * anterior["radio"]:
-                MOTIVOS_RECHAZO["salto_de_posicion_entre_frames"] += 1
-                return None, candidato
-
-        return resultado, candidato
-
-
-    # D. Abrir y procesar video
-
-    # Semilla fija para que K-Means sea reproducible
-    cv2.setRNGSeed(0)
-
-    video_3 = cv2.VideoCapture(str(VIDEO_PATH))
-
-    if not video_3.isOpened():
-        raise ValueError(f"No se pudo abrir {VIDEO_PATH}")
-
-    fps_3 = video_3.get(cv2.CAP_PROP_FPS)
-
-
-    if fps_3 <= 0:
-        video_3.release()
-        raise ValueError("FPS invalido")
-
-    registros = []
-    frames_revision = {}
-
-    resultado_anterior = None
-    fallos = 0
-    indice_frame = 0
-
-    total_frames = int(
-        video_3.get(cv2.CAP_PROP_FRAME_COUNT)
-    )
-
-    # Mostrar un frame cada 100 milisegundos
-    FRECUENCIA_VISUALIZACION = 10  # Hz
-
-    paso_frames = max(1, int(round(fps_3 / FRECUENCIA_VISUALIZACION)))
-
-    indices_revision = set(
-        range(0, total_frames, paso_frames)
-    )
-
-    while True:
-
-        ret, frame = video_3.read()
-
-        if not ret:
-            break
-
-        gris = cv2.cvtColor(
-            frame,
-            cv2.COLOR_BGR2GRAY
-        )
-
-        resultado, candidato = procesar_frame_pupila(
-            gris,
-            resultado_anterior
-        )
-
-        if resultado is None:
-
-            fallos += 1
-
-            # Si se pierde el seguimiento, volver a buscar
-            # en la zona de la semilla.
-            if fallos >= 3:
-
-                resultado_anterior = None
-
-                resultado, candidato = procesar_frame_pupila(gris)
-
-        if resultado is not None:
-
-            resultado_anterior = resultado
-            fallos = 0
-
-            area = resultado["area"]
-            diametro = resultado["diametro"]
-
-            centro_x = resultado["cx"]
-            centro_y = resultado["cy"]
-
-            circularidad_frame = resultado["circularidad"]
-            puntaje_frame = resultado["puntaje"]
-
-            detectada = 1
-
-        else:
-
-            area = np.nan
-            diametro = np.nan
-
-            centro_x = np.nan
-            centro_y = np.nan
-
-            circularidad_frame = np.nan
-            puntaje_frame = np.nan
-
-            detectada = 0
-
-        registros.append({
-            "frame": indice_frame,
-            "tiempo_s": indice_frame / fps_3,
-            "area_px2": area,
-            "diametro_px": diametro,
-            "centro_x": centro_x,
-            "centro_y": centro_y,
-            "circularidad": circularidad_frame,
-            "puntaje_deteccion": puntaje_frame,
-            "detectada": detectada
-        })
-
-        if indice_frame in indices_revision:
-
-            mascara = (
-                resultado["mascara"].copy()
-                if resultado is not None
-                else np.zeros_like(gris)
-            )
-
-            frames_revision[indice_frame] = (
-                frame.copy(),
-                mascara,
-                area,
-                candidato
-            )
-
-        indice_frame += 1
-
-    video_3.release()
-
-    if not registros:
-        raise ValueError("No se procesaron frames")
-
-
-    # Tabla de mediciones
-
-    tabla_mediciones_3 = pd.DataFrame(registros)
-
-    tiempos_3 = tabla_mediciones_3["tiempo_s"].to_numpy()
-    areas_3 = tabla_mediciones_3["area_px2"].to_numpy()
-    diametros_3 = tabla_mediciones_3["diametro_px"].to_numpy()
-
-    porcentaje_deteccion = (
-        100 * tabla_mediciones_3["detectada"].mean()
-    )
-
-    print("\n--- 3.2.1 Procesamiento del video ---")
-    print(f"Video: {Path(VIDEO_PATH).name}")
-    print(f"Metodo de segmentacion: {METODO_VIDEO} + {OPERACION_VIDEO}")
-    print(f"FPS: {fps_3:.2f}")
-    print(f"Frames procesados: {len(registros)}")
-    print(f"Duracion: {len(registros) / fps_3:.2f} s")
-    print(f"Detecciones validas: {porcentaje_deteccion:.2f}%")
-
-    print("\nMotivos por los que se descartaron intentos de deteccion:")
-    if MOTIVOS_RECHAZO:
-        for motivo, cantidad in MOTIVOS_RECHAZO.most_common():
-            print(f"  {motivo}: {cantidad}")
-    else:
-        print("  (ninguno)")
-
-    ruta_mediciones = (
-        carpeta_resultados / f"mediciones_{nombre_video}.csv"
-    )
-
-    tabla_mediciones_3.to_csv(
-        ruta_mediciones,
-        index=False
-    )
-
-    print(f"Mediciones guardadas en: {ruta_mediciones}")
-
-    # 3.2.2 Curvas temporales de area y diametro
-
-    # Filtro de atipicos (Hampel): marca como NaN los valores que se alejan
-    # demasiado de la mediana de su vecindad (picos aislados, segmentaciones
-    # erroneas que pasaron los controles).
-
-    def filtro_hampel(valores, ventana=7, n_sigmas=3.0, piso_rel=0.05):
-
-        serie = pd.Series(valores, dtype=float)
-
-        mediana = serie.rolling(
-            ventana, center=True, min_periods=3
-        ).median()
-
-        desvio_abs = (serie - mediana).abs()
-
-        mad = desvio_abs.rolling(
-            ventana, center=True, min_periods=3
-        ).median()
-
-        # Umbral robusto, con un piso relativo para tramos casi constantes
-        umbral = np.maximum(
-            n_sigmas * 1.4826 * mad,
-            piso_rel * mediana
-        )
-
-        atipicos = (desvio_abs > umbral).to_numpy()
-
-        salida = serie.copy()
-        salida[atipicos] = np.nan
-
-        return salida.to_numpy(), atipicos
-
-
-    # Interpolar solamente huecos de hasta 3 frames.
-
-    def interpolar_huecos_cortos(valores, max_hueco=3):
-
-        serie = pd.Series(valores, dtype=float)
-
-        salida = serie.interpolate(
-            method="linear",
-            limit_area="inside"
-        )
-
-        es_nan = serie.isna()
-
-        grupos = es_nan.ne(es_nan.shift()).cumsum()
-
-        for _, bloque in serie.groupby(grupos):
-
-            if bloque.isna().all() and len(bloque) > max_hueco:
-                salida.loc[bloque.index] = np.nan
-
-        return salida.to_numpy().copy()
-
-
-    areas_sin_atipicos, mascara_atipicos = filtro_hampel(areas_3)
-
-    print(f"Valores atipicos descartados (Hampel): {int(mascara_atipicos.sum())}")
-
-    areas_interpoladas = interpolar_huecos_cortos(
-        areas_sin_atipicos,
-        max_hueco=3
-    )
-
-    # Mediana temporal de cinco frames
-    serie_mediana = pd.Series(areas_interpoladas).rolling(
-        window=5,
-        center=True,
-        min_periods=3
-    ).median()
-
-    areas_procesadas = serie_mediana.to_numpy().copy()
-
-    # Mantener los intervalos sin mediciones
-    areas_procesadas[~np.isfinite(areas_interpoladas)] = np.nan
-
-    diametros_procesados = 2 * np.sqrt(
-        areas_procesadas / np.pi
+        f"Frames consistentes: {semilla_principal['n_validas']} "
+        f"de {semilla_principal['n_muestras']}"
     )
 
 
-    fig, ax = plt.subplots(
-        2, 1,
-        figsize=(11, 6),
-        sharex=True
+    CARPETA_FIGURAS.mkdir(parents=True, exist_ok=True)
+    CARPETA_DETALLE.mkdir(parents=True, exist_ok=True)
+
+    principal = video_path.resolve()
+
+    lista_videos = [video_path]
+
+    if procesar_otros:
+        lista_videos += sorted(
+            p for p in video_path.parent.iterdir()
+            if p.suffix.lower() in EXTENSIONES_VIDEO
+            and p.resolve() != principal
+        )
+
+    clave_metodo = re.sub(
+        r"[^A-Za-z0-9_=+-]", "_", f"{METODO_VIDEO}__{OPERACION_VIDEO}"
     )
 
-    ax[0].plot(
-        tiempos_3,
-        areas_3,
-        color="gray",
-        alpha=0.5,
-        label="Medicion original"
-    )
+    filas_resumen = []
 
-    if mascara_atipicos.any():
-        ax[0].scatter(
-            tiempos_3[mascara_atipicos],
-            areas_3[mascara_atipicos],
-            color="red",
-            s=14,
-            zorder=3,
-            label="Atipicos (Hampel)"
-        )
+    for ruta in lista_videos:
 
-    ax[0].plot(
-        tiempos_3,
-        areas_procesadas,
-        color="blue",
-        label="Serie procesada"
-    )
+        es_principal = ruta.resolve() == principal
+        mostrar = MOSTRAR_FIGURAS and es_principal
+        nombre = ruta.stem
+        t_inicio = time.time()
 
-    ax[0].set_title(
-        f"Area pupilar en funcion del tiempo ({METODO_VIDEO} + {OPERACION_VIDEO})"
-    )
-    ax[0].set_ylabel("Area (px²)")
-    ax[0].legend()
-    ax[0].grid(alpha=0.3)
+        print(f"\n{'=' * 60}\nRegistro: {ruta.name}"
+              f"{'  (principal)' if es_principal else ''}\n{'=' * 60}")
 
-    ax[1].plot(
-        tiempos_3,
-        diametros_3,
-        color="gray",
-        alpha=0.5
-    )
+        try:
 
-    ax[1].plot(
-        tiempos_3,
-        diametros_procesados,
-        color="blue"
-    )
+            ruta_mediciones = CARPETA_DETALLE / f"mediciones_{nombre}__{clave_metodo}.csv"
+            revision = {}
 
-    ax[1].set_title("Diametro pupilar en funcion del tiempo")
-    ax[1].set_xlabel("Tiempo (s)")
-    ax[1].set_ylabel("Diametro equivalente (px)")
-    ax[1].grid(alpha=0.3)
+            if (not es_principal) and USAR_CACHE_OTROS and ruta_mediciones.exists():
 
-    plt.tight_layout()
-    plt.show()
-
-
-
-    # 3.2.3 PARAMETROS FISIOLOGICOS
-
-    # Detectar automaticamente cuando se enciende la luz
-    # y calcular los parametros a partir del area pupilar.
-
-    # A. Medir la luminosidad a lo largo del video
-
-    video_luz = cv2.VideoCapture(str(VIDEO_PATH))
-
-    if not video_luz.isOpened():
-        raise ValueError("No se pudo abrir el video para analizar la luz")
-
-    luminosidades = []
-
-    # Usamos una region fija alrededor de la semilla,
-    # excluyendo la pupila para que sus cambios de tamaño
-    # no se confundan con cambios de iluminacion.
-
-    cx_semilla = SEMILLA["cx"]
-    cy_semilla = SEMILLA["cy"]
-    radio_semilla = SEMILLA["radio"]
-
-    while True:
-        ret, frame_luz = video_luz.read()
-
-        if not ret:
-            break
-
-        gris_luz = cv2.cvtColor(
-            frame_luz, cv2.COLOR_BGR2GRAY
-        )
-
-        alto_luz, ancho_luz = gris_luz.shape
-
-        # Recorte local alrededor del ojo
-        margen = int(np.ceil(3.2 * radio_semilla))
-
-        x1 = max(0, int(cx_semilla - margen))
-        x2 = min(ancho_luz, int(cx_semilla + margen + 1))
-        y1 = max(0, int(cy_semilla - margen))
-        y2 = min(alto_luz, int(cy_semilla + margen + 1))
-
-        roi_luz = gris_luz[y1:y2, x1:x2]
-
-        Y, X = np.ogrid[y1:y2, x1:x2]
-
-        distancia = np.sqrt(
-            (X - cx_semilla)**2 +
-            (Y - cy_semilla)**2
-        )
-
-        # Anillo exterior a la pupila
-        # para analizar principalmente iris y entorno.
-        mascara_luz = (
-            (distancia >= 2.0 * radio_semilla) &
-            (distancia <= 3.0 * radio_semilla)
-        )
-
-        if np.any(mascara_luz):
-            # La mediana reduce la influencia de reflejos
-            # y pixeles excesivamente brillantes.
-            brillo = np.median(roi_luz[mascara_luz])
-        else:
-            brillo = np.nan
-
-        luminosidades.append(brillo)
-
-    video_luz.release()
-
-    luminosidades = np.asarray(luminosidades, dtype=float)
-    tiempos_luz = np.arange(len(luminosidades)) / fps_3
-
-    # Suavizado de la luminosidad
-    ventana_luz = max(3, int(round(0.15 * fps_3)))
-    if ventana_luz % 2 == 0:
-        ventana_luz += 1
-
-    luminosidad_suavizada = (
-        pd.Series(luminosidades)
-        .interpolate(limit_direction="both")
-        .rolling(ventana_luz, center=True, min_periods=1)
-        .median()
-        .to_numpy()
-    )
-
-    # B. Detectar el encendido de la luz
-
-    # Comparamos la luminosidad media antes y despues
-    # de cada instante, buscando un aumento sostenido.
-
-    n_ventana = max(3, int(round(0.30 * fps_3)))
-
-    cambios_luz = np.full(
-        len(luminosidad_suavizada),
-        np.nan
-    )
-
-    for i in range(n_ventana, len(cambios_luz) - n_ventana):
-
-        brillo_antes = np.median(
-            luminosidad_suavizada[i - n_ventana:i]
-        )
-
-        brillo_despues = np.median(
-            luminosidad_suavizada[i:i + n_ventana]
-        )
-
-        cambios_luz[i] = brillo_despues - brillo_antes
-
-    # Estimar nivel de ruido de los cambios de luminosidad
-    cambios_validos = cambios_luz[np.isfinite(cambios_luz)]
-
-    TIEMPO_ESTIMULO = np.nan
-    TIEMPO_APAGADO = np.nan
-
-    if len(cambios_validos) > 0:
-
-        mediana_cambio = np.median(cambios_validos)
-        mad_cambio = np.median(
-            np.abs(cambios_validos - mediana_cambio)
-        )
-
-        ruido_luz = 1.4826 * mad_cambio
-
-        # Exigimos un aumento superior al ruido y
-        # al 8% del brillo típico de la imagen.
-        umbral_cambio = max(
-            4 * ruido_luz,
-            0.08 * np.median(luminosidad_suavizada),
-            5.0
-        )
-
-        # Buscar incrementos claros y sostenidos
-        posibles_encendidos = np.where(
-            cambios_luz > umbral_cambio
-        )[0]
-
-        # Ignoramos eventos demasiado cercanos al inicio
-        # o al final, porque no tienen ventanas completas.
-        posibles_encendidos = posibles_encendidos[
-            (posibles_encendidos >= n_ventana) &
-            (posibles_encendidos < len(cambios_luz) - n_ventana)
-        ]
-
-        if len(posibles_encendidos) > 0:
-
-            # Agrupar frames consecutivos del mismo cambio.
-            grupos = np.split(
-                posibles_encendidos,
-                np.where(np.diff(posibles_encendidos) > 1)[0] + 1
-            )
-
-            # Elegir el primer aumento significativo.
-            primer_grupo = grupos[0]
-
-            indice_estimulo = primer_grupo[
-                np.argmax(cambios_luz[primer_grupo])
-            ]
-
-            TIEMPO_ESTIMULO = float(
-                tiempos_luz[indice_estimulo]
-            )
-
-       
-            # Detectar el apagado cuando la luminosidad
-            # vuelve aproximadamente al nivel anterior al estimulo.
-
-            # Nivel basal: mediana del segundo previo al encendido.
-            basal_luz = (
-                (tiempos_luz >= TIEMPO_ESTIMULO - 1.0) &
-                (tiempos_luz < TIEMPO_ESTIMULO)
-            )
-
-            if np.any(basal_luz):
-
-                brillo_basal = np.median(
-                    luminosidad_suavizada[basal_luz]
-                )
-
-                # Nivel de iluminacion durante el estimulo,
-                # evitando el pico transitorio del encendido.
-                zona_encendida = (
-                    (tiempos_luz >= TIEMPO_ESTIMULO + 0.7) &
-                    (tiempos_luz <= TIEMPO_ESTIMULO + 2.0)
-                )
-
-                if np.any(zona_encendida):
-
-                    brillo_encendido = np.median(
-                        luminosidad_suavizada[zona_encendida]
-                    )
-
-                    # Umbral intermedio entre luz apagada y encendida.
-                    umbral_apagado = (
-                        brillo_basal +
-                        0.35 * (brillo_encendido - brillo_basal)
-                    )
-
-                    if brillo_encendido > brillo_basal + umbral_cambio:
-
-                        # Buscar un regreso sostenido al nivel oscuro.
-                        # Se empieza despues de la estabilizacion inicial.
-                        inicio_busqueda = TIEMPO_ESTIMULO + 2.0
-
-                        n_confirmacion = max(
-                            3, int(round(0.20 * fps_3))
-                        )
-
-                        for i in range(len(tiempos_luz) - n_confirmacion):
-
-                            if tiempos_luz[i] < inicio_busqueda:
-                                continue
-
-                            tramo = luminosidad_suavizada[
-                                i:i + n_confirmacion
-                            ]
-
-                            if np.all(tramo < umbral_apagado):
-
-                                TIEMPO_APAGADO = float(
-                                    tiempos_luz[i]
-                                )
-                                break
-
-
-    print("\n--- Deteccion automatica del estimulo ---")
-
-    if np.isfinite(TIEMPO_ESTIMULO):
-        print(f"Encendido estimado: {TIEMPO_ESTIMULO:.3f} s")
-    else:
-        print("No se detecto un encendido luminoso confiable.")
-
-    if np.isfinite(TIEMPO_APAGADO):
-        print(f"Apagado estimado: {TIEMPO_APAGADO:.3f} s")
-
-    # Visualizar la deteccion del estimulo
-    plt.figure(figsize=(11, 4))
-
-    plt.plot(
-        tiempos_luz,
-        luminosidad_suavizada,
-        color="orange",
-        label="Luminosidad"
-    )
-
-    if np.isfinite(TIEMPO_ESTIMULO):
-        plt.axvline(
-            TIEMPO_ESTIMULO,
-            color="red",
-            linestyle="--",
-            label="Encendido estimado"
-        )
-
-    if np.isfinite(TIEMPO_APAGADO):
-        plt.axvline(
-            TIEMPO_APAGADO,
-            color="blue",
-            linestyle="--",
-            label="Apagado estimado"
-        )
-
-    plt.xlabel("Tiempo (s)")
-    plt.ylabel("Intensidad mediana (0-255)")
-    plt.title("Deteccion automatica del estimulo luminoso")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-
-    # C. Calcular parametros fisiologicos
-
-    latencia = np.nan
-    amplitud = np.nan
-    velocidad_constriccion = np.nan
-    velocidad_redilatacion = np.nan
-
-    area_basal = np.nan
-    area_minima = np.nan
-    tiempo_inicio = np.nan
-    tiempo_minimo = np.nan
-
-    estado_parametros = "No calculados"
-
-    print("\n--- 3.2.3 Parametros fisiologicos ---")
-
-    if not np.isfinite(TIEMPO_ESTIMULO):
-
-        print("No se calculan parametros: estimulo no identificado.")
-        estado_parametros = "Estimulo no detectado"
-
-    else:
-
-        t = np.asarray(tiempos_3, dtype=float)
-        a = np.asarray(areas_procesadas, dtype=float)
-
-        # Verificar calidad de las mediciones alrededor
-        # del estimulo. No reemplazar automaticamente
-        # intervalos grandes sin deteccion.
-        basal = (
-            (t >= TIEMPO_ESTIMULO - 1.0) &
-            (t < TIEMPO_ESTIMULO) &
-            np.isfinite(a)
-        )
-
-        # Limitar la búsqueda de constriccion a 4 segundos
-        # o hasta el apagado de la luz, lo que ocurra primero.
-        limite_constriccion = TIEMPO_ESTIMULO + 4.0
-
-        if np.isfinite(TIEMPO_APAGADO):
-            limite_constriccion = min(
-                limite_constriccion,
-                TIEMPO_APAGADO
-            )
-
-        respuesta = (
-            (t >= TIEMPO_ESTIMULO) &
-            (t <= limite_constriccion)
-        )
-
-        # Exigir mediciones suficientes y continuas
-        # en el tramo de respuesta.
-        proporcion_valida = (
-            np.mean(np.isfinite(a[respuesta]))
-            if np.any(respuesta) else 0
-        )
-
-        if basal.sum() < 3:
-
-            estado_parametros = "Basal insuficiente"
-            print("No hay suficientes mediciones antes del estimulo.")
-
-        elif proporcion_valida < 0.90:
-
-            estado_parametros = "Respuesta incompleta"
-            print("Hay demasiadas mediciones faltantes durante la respuesta.")
-
-        else:
-
-            area_basal = float(np.median(a[basal]))
-
-            indices_respuesta = np.where(
-                respuesta & np.isfinite(a)
-            )[0]
-
-            tr = t[indices_respuesta]
-            ar = a[indices_respuesta]
-
-            if len(tr) < 5:
-
-                estado_parametros = "Respuesta insuficiente"
-                print("No hay suficientes mediciones posteriores.")
+                df_crudo = pd.read_csv(ruta_mediciones)
+                fps_reg = (len(df_crudo) - 1) / df_crudo["tiempo_s"].iloc[-1]
+                print("  Mediciones cargadas de cache (carpeta detalle).")
 
             else:
 
-                # Area minima y amplitud
-                i_min = int(np.argmin(ar))
-
-                area_minima = float(ar[i_min])
-                tiempo_minimo = float(tr[i_min])
-
-                amplitud = area_basal - area_minima
-
-                if amplitud <= 0:
-
-                    estado_parametros = "Sin constriccion"
-                    amplitud = np.nan
-                    print("No se identifico una disminucion del area.")
-
-                else:
-
-                    # Inicio: descenso sostenido de al menos
-                    # el 5% de la amplitud total.
-                    umbral_inicio = (
-                        area_basal - 0.05 * amplitud
-                    )
-
-                    debajo = ar <= umbral_inicio
-
-                    indice_inicio = None
-
-                    for i in range(max(0, i_min - 1)):
-
-                        if (
-                            i + 2 < len(ar) and
-                            debajo[i] and
-                            debajo[i + 1] and
-                            debajo[i + 2]
-                        ):
-                            indice_inicio = i
-                            break
-
-                    if indice_inicio is None:
-
-                        estado_parametros = "Inicio no identificado"
-                        print("No se pudo identificar el inicio de constriccion.")
-
-                    else:
-
-                        tiempo_inicio = float(
-                            tr[indice_inicio]
-                        )
-
-                        latencia = (
-                            tiempo_inicio - TIEMPO_ESTIMULO
-                        )
-
-                        duracion_constriccion = (
-                            tiempo_minimo - tiempo_inicio
-                        )
-
-                        if duracion_constriccion > 0:
-
-                            velocidad_constriccion = (
-                                amplitud / duracion_constriccion
-                            )
-
-                            # Redilatacion desde el minimo
-                            # hasta la ultima muestra valida.
-                            despues_minimo = (
-                                (t > tiempo_minimo) &
-                                np.isfinite(a)
-                            )
-
-                            if np.any(despues_minimo):
-
-                                indices_despues = np.where(
-                                    despues_minimo
-                                )[0]
-
-                                i_final = indices_despues[-1]
-
-                                duracion_redilatacion = (
-                                    t[i_final] - tiempo_minimo
-                                )
-
-                                if duracion_redilatacion > 0:
-                                    velocidad_redilatacion = (
-                                        (a[i_final] - area_minima) /
-                                        duracion_redilatacion
-                                    )
-
-                            estado_parametros = "Calculados"
-
-                            print(f"Area basal: {area_basal:.2f} px2")
-                            print(f"Area minima: {area_minima:.2f} px2")
-                            print(f"Amplitud: {amplitud:.2f} px2")
-                            print(f"Latencia: {latencia:.3f} s")
-                            print(
-                                f"Velocidad de constriccion: "
-                                f"{velocidad_constriccion:.2f} px2/s"
-                            )
-                            print(
-                                f"Velocidad de redilatacion: "
-                                f"{velocidad_redilatacion:.2f} px2/s"
-                            )
-
-                        else:
-
-                            estado_parametros = "Duracion invalida"
-                            print("Duracion de constriccion invalida.")
-
-    print(f"Estado: {estado_parametros}")
-
-
-    # D. Graficar los parametros sobre la curva pupilar
-
-    plt.figure(figsize=(11, 4))
-
-    plt.plot(
-        tiempos_3,
-        areas_procesadas,
-        color="blue",
-        label="Area pupilar procesada"
-    )
-
-    if np.isfinite(TIEMPO_ESTIMULO):
-        plt.axvline(
-            TIEMPO_ESTIMULO,
-            color="red",
-            linestyle="--",
-            label="Estimulo"
-        )
-
-    if np.isfinite(tiempo_inicio):
-        plt.axvline(
-            tiempo_inicio,
-            color="green",
-            linestyle="--",
-            label="Inicio de constriccion"
-        )
-
-    if np.isfinite(tiempo_minimo):
-        plt.scatter(
-            tiempo_minimo,
-            area_minima,
-            color="black",
-            s=50,
-            label="Area minima"
-        )
-
-    if np.isfinite(area_basal):
-        plt.axhline(
-            area_basal,
-            color="gray",
-            linestyle=":",
-            label="Area basal"
-        )
-
-    plt.xlabel("Tiempo (s)")
-    plt.ylabel("Area pupilar (px2)")
-    plt.title("Respuesta pupilar al estimulo luminoso")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.show()
-
-
-    # E. Guardar parametros fisiologicos en CSV
-
-    tabla_parametros = pd.DataFrame([{
-        "video": Path(VIDEO_PATH).name,
-        "metodo": METODO_VIDEO,
-        "morfologia": OPERACION_VIDEO,
-        "tiempo_estimulo_s": TIEMPO_ESTIMULO,
-        "tiempo_apagado_s": TIEMPO_APAGADO,
-        "area_basal_px2": area_basal,
-        "area_minima_px2": area_minima,
-        "tiempo_inicio_s": tiempo_inicio,
-        "tiempo_minimo_s": tiempo_minimo,
-        "latencia_s": latencia,
-        "amplitud_px2": amplitud,
-        "velocidad_constriccion_px2_s": velocidad_constriccion,
-        "velocidad_redilatacion_px2_s": velocidad_redilatacion,
-        "estado": estado_parametros
-    }])
-
-    ruta_parametros = (
-        carpeta_resultados /
-        f"parametros_fisiologicos_{nombre_video}.csv"
-    )
-
-    tabla_parametros.to_csv(
-        ruta_parametros,
-        index=False
-    )
-
-    print(f"\nParametros guardados en: {ruta_parametros}")
-
-
-
-    # 3.2.4 ARTEFACTOS Y CONTROL DE CALIDAD
-
-    # Visualizar los frames seleccionados y sus contornos
-
-
-    # Mostrar frames en tandas para evitar superposiciones
-    indices_mostrar = sorted(frames_revision)
-
-    FRAMES_POR_TANDA = 10
-
-    for inicio in range(0, len(indices_mostrar), FRAMES_POR_TANDA):
-
-        tanda = indices_mostrar[inicio:inicio + FRAMES_POR_TANDA]
-
-        fig, ax = plt.subplots(
-            2,
-            len(tanda),
-            figsize=(15, 3.5),
-            squeeze=False
-        )
-
-        for j, indice in enumerate(tanda):
-
-            frame, mascara, area, candidato = frames_revision[indice]
-
-            original_rgb = cv2.cvtColor(
-                frame, cv2.COLOR_BGR2RGB
-            )
-
-            imagen_contorno = original_rgb.copy()
-
-            contornos, _ = cv2.findContours(
-                mascara,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
-
-            cv2.drawContours(
-                imagen_contorno,
-                contornos,
-                -1,
-                (0, 255, 0),
-                2
-            )
-
-            if candidato is not None:
-                cv2.circle(
-                    imagen_contorno,
-                    (
-                        int(round(candidato["cx"])),
-                        int(round(candidato["cy"]))
-                    ),
-                    int(round(candidato["radio"])),
-                    (255, 0, 0),
-                    1
+                df_crudo, fps_reg, revision, _ = procesar_video(
+                    ruta,
+                    semilla=semilla_principal if es_principal else None,
+                    guardar_revision=(es_principal and modo == "desarrollo")
                 )
 
-            ax[0, j].imshow(original_rgb)
-            ax[0, j].set_title(
-                f"{indice / fps_3:.2f} s",
-                fontsize=8
+                df_crudo.to_csv(ruta_mediciones, index=False)
+
+                if es_principal and modo == "desarrollo":
+                    print("  Motivos de descarte de intentos de deteccion:")
+                    for motivo, cantidad in MOTIVOS_RECHAZO.most_common():
+                        print(f"    {motivo}: {cantidad}")
+
+            out, P, eventos_luz, conteo = analizar_registro(df_crudo, fps_reg)
+
+            pct_deteccion = 100 * out["detectada"].mean()
+
+            print(f"  {len(out)} frames | {out['tiempo_s'].iloc[-1]:.1f} s | "
+                  f"detecciones validas: {pct_deteccion:.1f} %")
+            print(f"  Artefactos: {conteo['n_parpadeos']} parpadeos, "
+                  f"{conteo['n_perdidas_seguimiento']} perdidas de seguimiento, "
+                  f"{conteo['n_mov_oculares']} saltos oculares, "
+                  f"{conteo['n_descartados']} mediciones descartadas\n")
+
+            resumen_fila = fila_resumen(ruta.name, P)
+            filas_resumen.append(resumen_fila)
+
+            imprimir_resumen_registro(resumen_fila)
+
+            # --- Archivos de salida claros (formato fijo) ---
+            pd.DataFrame([resumen_fila]).to_csv(
+                carpeta_resultados / f"parametros_{nombre}.csv",
+                index=False, encoding="utf-8-sig"
             )
 
-            ax[1, j].imshow(imagen_contorno)
+            serie_clara = pd.DataFrame({
+                "frame": out["frame"],
+                "tiempo_s": out["tiempo_s"].round(3),
+                "area_px2": out["area_procesada_px2"].round(1),
+                "diametro_px": out["diametro_procesado_px"].round(2),
+                "evento": out["evento"]
+            })
 
-            if np.isfinite(area):
-                titulo = f"{area:.0f} px²"
-            else:
-                titulo = "No detectada"
+            serie_clara.to_csv(
+                carpeta_resultados / f"serie_{nombre}.csv", index=False
+            )
 
-            ax[1, j].set_title(titulo, fontsize=8)
+            # --- Detalle completo (para validacion y revision) ---
+            out.round(4).to_csv(
+                CARPETA_DETALLE / f"serie_detallada_{nombre}.csv", index=False
+            )
 
-            ax[0, j].axis("off")
-            ax[1, j].axis("off")
+            pd.DataFrame([{
+                "video": ruta.name, "metodo": METODO_VIDEO,
+                "morfologia": OPERACION_VIDEO,
+                "fps": fps_reg, "duracion_s": out["tiempo_s"].iloc[-1],
+                "porcentaje_deteccion": pct_deteccion,
+                **conteo, **P
+            }]).round(4).to_csv(
+                CARPETA_DETALLE / f"parametros_detallados_{nombre}.csv", index=False
+            )
 
-        plt.subplots_adjust(
-            left=0.01,
-            right=0.99,
-            top=0.88,
-            bottom=0.05,
-            wspace=0.08,
-            hspace=0.25
-        )
+            # --- Archivos con los nombres y columnas del formato anterior ---
+            if GUARDAR_FORMATO_ANTERIOR:
 
-        plt.show()
-        plt.close(fig)
+                df_crudo[[
+                    "frame", "tiempo_s", "area_px2", "diametro_px", "centro_x",
+                    "centro_y", "circularidad", "puntaje_deteccion", "detectada"
+                ]].to_csv(carpeta_resultados / f"mediciones_{nombre}.csv", index=False)
+
+                out[[
+                    "tiempo_s", "area_original_px2", "area_procesada_px2",
+                    "diametro_original_px", "diametro_procesado_px"
+                ]].to_csv(carpeta_resultados / f"serie_procesada_{nombre}.csv", index=False)
+
+                pd.DataFrame([{
+                    "video": ruta.name,
+                    "metodo": metodo,
+                    "morfologia": operacion,
+                    "tiempo_estimulo_s": P["tiempo_estimulo_s"],
+                    "tiempo_apagado_s": P["tiempo_apagado_s"],
+                    "area_basal_px2": P["area_basal_px2"],
+                    "area_minima_px2": P["area_minima_px2"],
+                    "tiempo_inicio_s": P["tiempo_inicio_s"],
+                    "tiempo_minimo_s": P["tiempo_minimo_s"],
+                    "latencia_s": P["latencia_s"],
+                    "amplitud_px2": P["amplitud_px2"],
+                    "velocidad_constriccion_px2_s": P["velocidad_constriccion_px2_s"],
+                    "velocidad_redilatacion_px2_s": P["velocidad_redilatacion_px2_s"],
+                    "estado": estado_texto(P)
+                }]).to_csv(
+                    carpeta_resultados / f"parametros_fisiologicos_{nombre}.csv",
+                    index=False
+                )
+
+            # --- Graficos ---
+            graficar_curvas(out, nombre, mostrar)
+            graficar_luz(out, eventos_luz, nombre, mostrar)
+            graficar_parametros(out, P, nombre, mostrar)
+
+            if es_principal and revision:
+                mostrar_revision(revision, fps_reg, nombre, mostrar)
+
+            print(f"\n  Tiempo de ejecucion: {time.time() - t_inicio:.1f} s")
+
+        except Exception as error:
+
+            if es_principal:
+                raise
+
+            print(f"  [!] Se omite este video: {error}")
+
+            filas_resumen.append({
+                "video": ruta.name, "tipo_registro": "Error",
+                "estado": str(error)
+            })
 
 
+    # ------------------------------------------------------------
+    # TABLAS FINALES
+    # ------------------------------------------------------------
 
-    frames_sin_deteccion = int(
-        (tabla_mediciones_3["detectada"] == 0).sum()
+    resumen = pd.DataFrame(filas_resumen)
+
+    resumen.to_csv(
+        carpeta_resultados / "resumen_registros.csv",
+        index=False, encoding="utf-8-sig"
     )
 
-    print("\n--- 3.2.4 Control de calidad ---")
-    print(f"Frames sin deteccion: {frames_sin_deteccion}")
-    print(f"Porcentaje sin deteccion: {100 - porcentaje_deteccion:.2f}%")
-    print(f"Atipicos descartados (Hampel): {int(mascara_atipicos.sum())}")
-    print("Valores faltantes: NaN")
-    print("Interpolacion: solo huecos de hasta 3 frames")
-    print("Suavizado: mediana temporal de 5 frames")
+    print(f"\n{'=' * 60}\nRESUMEN DE REGISTROS\n{'=' * 60}")
 
+    columnas_pantalla = [
+        "video", "tipo_registro", "latencia_s", "amplitud_px2",
+        "amplitud_pct", "vel_constriccion_px2_s", "vel_redilatacion_px2_s"
+    ]
 
-    #
-    # GUARDAR SERIE TEMPORAL
-    #
-
-    tabla_serie = pd.DataFrame({
-        "tiempo_s": tiempos_3,
-        "area_original_px2": areas_3,
-        "area_procesada_px2": areas_procesadas,
-        "diametro_original_px": diametros_3,
-        "diametro_procesado_px": diametros_procesados
-    })
-
-    ruta_serie = (
-        carpeta_resultados /
-        f"serie_procesada_{nombre_video}.csv"
+    print(
+        resumen[[c for c in columnas_pantalla if c in resumen.columns]]
+        .fillna("-").to_string(index=False)
     )
 
-    tabla_serie.to_csv(
-        ruta_serie,
-        index=False
+    variabilidad = tabla_variabilidad(resumen)
+
+    variabilidad.to_csv(
+        carpeta_resultados / "variabilidad_entre_registros.csv",
+        index=False, encoding="utf-8-sig"
     )
 
-    print(f"Serie temporal guardada en: {ruta_serie}")
+    print(f"\n{'=' * 60}\nVARIABILIDAD ENTRE REGISTROS (media ± desvio)\n{'=' * 60}")
+    print(variabilidad.to_string(index=False))
 
+    # Excel con las dos tablas (opcional: necesita openpyxl)
+    try:
+        with pd.ExcelWriter(carpeta_resultados / "resumen_resultados.xlsx") as escritor:
+            resumen.to_excel(escritor, sheet_name="Registros", index=False)
+            variabilidad.to_excel(escritor, sheet_name="Variabilidad", index=False)
+        print("\nExcel generado: resultados/resumen_resultados.xlsx")
+    except Exception:
+        print("\n(Para generar tambien el Excel: pip install openpyxl)")
+
+    print("\n--- 3.2.4 Metodo de filtrado/interpolacion de artefactos ---")
+    print("1. Frames sin deteccion o rechazados por controles de calidad -> NaN.")
+    print("2. Filtro de Hampel (ventana 7, 3 sigmas robustas, piso 5%) -> atipicos a NaN.")
+    print("3. Filtro de mediana local (0.3 s, tolerancia 35%) -> saltos de varios frames a NaN.")
+    print("4. Margen de 0.05 s alrededor de cada parpadeo y descarte de tramos validos < 0.1 s.")
+    print("5. Interpolacion lineal solo en huecos de hasta 3 frames; mediana de 5 frames.")
+    print("6. Columna 'evento': parpadeo / perdida_seguimiento / mov_ocular.")
+    print(f"\nResultados en: {carpeta_resultados}")
+
+    return resumen, variabilidad
+
+
+
+def modulo3(frame, roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion,
+            VIDEO_PATH, CARPETA_PROYECTO):
+    """Modulo 3 completo para el modo "desarrollo": 3.1 + 3.2.
+
+    Los resultados del Modulo 2 llegan como parametros; VIDEO_PATH se comparte
+    con el resto del proyecto para analizar el mismo video.
+    """
+    VIDEO_PATH = Path(VIDEO_PATH)
+    CARPETA_PROYECTO = Path(CARPETA_PROYECTO)
+
+    if not VIDEO_PATH.is_file():
+        raise FileNotFoundError(f"No se encontro el video: {VIDEO_PATH}")
+
+    if mascara_final is None or mascara_final.shape != roi_gris.shape:
+        raise ValueError("La mascara del Modulo 2 no coincide con la ROI")
+
+    analizar_frame_segmentado(
+        roi, roi_gris, mascara_final, mejor_metodo, mejor_operacion
+    )
+
+    return procesar_registros(
+        VIDEO_PATH,
+        CARPETA_PROYECTO / "resultados",
+        mejor_metodo,
+        mejor_operacion,
+        modo="desarrollo",
+        procesar_otros=PROCESAR_TODOS_LOS_VIDEOS
+    )

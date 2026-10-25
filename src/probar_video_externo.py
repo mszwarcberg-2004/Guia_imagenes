@@ -1,13 +1,31 @@
+"""Validacion externa del TP PSIB: procesa un video nuevo, sin seleccion manual.
 
-"""Validacion externa del TP PSIB: un video, sin seleccion manual.
+COMO USAR (para la catedra):
+  1. Cambiar la ruta del video en la variable VIDEO_PATH (esta marcada mas abajo
+     con un cartel). Es lo unico que hay que cambiar.
+  2. Desde la carpeta raiz del repositorio, ejecutar:
+         python3 src/probar_video_externo.py
 
-Ubicar este archivo dentro de src/ del repositorio y editar solamente VIDEO_PATH.
-Incluye una inicializacion automatica mas selectiva y reutiliza el modulo 3 del equipo.
+  Alternativa, sin editar nada: pasar la ruta al ejecutar.
+         python3 src/probar_video_externo.py ruta/al/video.mov
+
+SALIDA, en resultados_externos/<nombre_del_video>/ :
+  resultados.xlsx     UN solo archivo con dos hojas:
+                        - Parametros: latencia, amplitud, velocidad de constriccion y de
+                          redilatacion (cada uno una sola vez), mas datos del registro
+                        - Curva: area y diametro de la pupila frame a frame
+  curva_pupilar.png   la misma curva, como grafico
+  extras/             material de apoyo (video de revision, log, tablas internas)
+
+El seguimiento usa el metodo mas robusto de nuestras pruebas (Snakes, sin morfologia).
+Si se vuelve a procesar un video, su carpeta de resultados se reemplaza por completo.
 """
 
 from pathlib import Path
 import contextlib
 import io
+import shutil
+import sys
 import traceback
 import warnings
 
@@ -19,494 +37,47 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from funciones_modulo3 import modulo3
-from funciones_modulo4 import analizar_imagen, comparar_diametro_jpeg
+import funciones_modulo3
+from funciones_modulo3 import procesar_registros
 
 
 RAIZ = Path(__file__).resolve().parent.parent
 
-# ===== UNICA VARIABLE A MODIFICAR POR LA CATEDRA =====
-VIDEO_PATH = RAIZ / "datos" / "Videos_ojo" / "video_prueba.mp4"
-# Tambien se admite una ruta absoluta:
-# VIDEO_PATH = Path("/Users/.../video.mov")
-# ====================================================
+# ==============================================================================
+#   >>>   LO UNICO QUE HAY QUE CAMBIAR: LA RUTA DEL VIDEO   <<<
+#
+#   Poner entre comillas la ruta del video. Puede ser absoluta o relativa a la
+#   carpeta del repositorio. Ejemplos:
+#       VIDEO_PATH = "/Users/nombre/Descargas/video_catedra.mov"
+#       VIDEO_PATH = "datos/Videos_ojo/otro_video.mov"
+# ==============================================================================
+VIDEO_PATH = "datos/Videos_ojo/video_prueba.mp4"
+# ==============================================================================
 
-METODO = "Watershed"
-MORFOLOGIA = "Dilatacion"
+# Metodo mas robusto de nuestras pruebas (Modulo 2: mayor Dice contra la referencia manual)
+METODO = "Snakes"
+MORFOLOGIA = "Sin morfologia"
+
 SALIDAS = RAIZ / "resultados_externos"
 
-
-# ============================================================
-# ROI AUTOMATICA - MISMO DETECTOR QUE EL MODULO 3
-# ============================================================
-
-def _detectar_centro_pupila(gris, zona, rango_radios, n_radios=8):
-    """
-    Busca un disco oscuro y uniforme rodeado de un anillo
-    mas claro, utilizando el criterio del Modulo 3.
-    """
-
-    ANCHO_DETECCION = 420
-    PUNTAJE_MINIMO = 0.20
-    PESO_UNIFORMIDAD = 0.5
-
-    alto_original, ancho_original = gris.shape
-
-    escala = min(
-        1.0,
-        ANCHO_DETECCION / ancho_original
-    )
-
-    ancho = max(
-        1,
-        int(round(ancho_original * escala))
-    )
-
-    alto = max(
-        1,
-        int(round(alto_original * escala))
-    )
-
-    imagen = cv2.resize(
-        gris,
-        (ancho, alto),
-        interpolation=cv2.INTER_AREA
-    )
-
-    imagen = cv2.GaussianBlur(
-        imagen,
-        (3, 3),
-        0
-    ).astype(np.float32)
-
-    imagen_cuadrado = imagen ** 2
-
-    xmin = int(max(0, zona[0] * escala))
-    xmax = int(min(ancho, zona[1] * escala))
-
-    ymin = int(max(0, zona[2] * escala))
-    ymax = int(min(alto, zona[3] * escala))
-
-    if xmax <= xmin or ymax <= ymin:
-        return None
-
-    Y, X = np.ogrid[:alto, :ancho]
-
-    zona_busqueda = (
-        (X >= xmin) &
-        (X < xmax) &
-        (Y >= ymin) &
-        (Y < ymax)
-    )
-
-    rmin = max(
-        3,
-        int(round(rango_radios[0] * escala))
-    )
-
-    rmax = max(
-        rmin,
-        int(round(rango_radios[1] * escala))
-    )
-
-    radios = np.unique(
-        np.round(
-            np.linspace(rmin, rmax, n_radios)
-        ).astype(int)
-    )
-
-    mejor = None
-    mejor_puntaje = -np.inf
-
-    for radio in radios:
-
-        radio_externo = int(
-            np.ceil(1.8 * radio)
-        )
-
-        coordenadas = np.arange(
-            -radio_externo,
-            radio_externo + 1
-        )
-
-        yy, xx = np.meshgrid(
-            coordenadas,
-            coordenadas,
-            indexing="ij"
-        )
-
-        distancia = np.sqrt(
-            xx ** 2 + yy ** 2
-        )
-
-        disco = (
-            distancia <= radio
-        ).astype(np.float32)
-
-        anillo = (
-            (distancia >= 1.2 * radio) &
-            (distancia <= 1.8 * radio)
-        ).astype(np.float32)
-
-        disco /= disco.sum()
-        anillo /= anillo.sum()
-
-        media_disco = cv2.filter2D(
-            imagen, -1, disco
-        )
-
-        media_disco_2 = cv2.filter2D(
-            imagen_cuadrado, -1, disco
-        )
-
-        media_anillo = cv2.filter2D(
-            imagen, -1, anillo
-        )
-
-        desvio_disco = np.sqrt(
-            np.maximum(
-                media_disco_2 - media_disco ** 2,
-                0
-            )
-        )
-
-        referencia = media_anillo + 10.0
-
-        contraste_relativo = (
-            media_anillo - media_disco
-        ) / referencia
-
-        puntaje_mapa = (
-            contraste_relativo -
-            PESO_UNIFORMIDAD *
-            desvio_disco / referencia
-        )
-
-        margen_valido = radio_externo + 1
-
-        zona_valida = zona_busqueda.copy()
-
-        zona_valida[:margen_valido, :] = False
-        zona_valida[-margen_valido:, :] = False
-        zona_valida[:, :margen_valido] = False
-        zona_valida[:, -margen_valido:] = False
-
-        if not np.any(zona_valida):
-            continue
-
-        puntajes = np.where(
-            zona_valida,
-            puntaje_mapa,
-            -np.inf
-        )
-
-        indice = np.unravel_index(
-            np.argmax(puntajes),
-            puntajes.shape
-        )
-
-        puntaje = float(
-            puntajes[indice]
-        )
-
-        if puntaje > mejor_puntaje:
-
-            mejor_puntaje = puntaje
-
-            mejor = {
-                "cx": float(indice[1] / escala),
-                "cy": float(indice[0] / escala),
-                "radio": float(radio / escala),
-                "puntaje": puntaje
-            }
-
-    if mejor is None:
-        return None
-
-    if mejor_puntaje < PUNTAJE_MINIMO:
-        return None
-
-    return mejor
-
-
-def preparar_roi_automatica(ruta, debug_dir=None):
-    """
-    Detecta la pupila en 15 frames del video.
-
-    Usa el mismo criterio de consenso espacial del
-    Modulo 3 y devuelve una ROI y mascara iniciales
-    centradas en la pupila.
-    """
-
-    cap = cv2.VideoCapture(str(ruta))
-
-    if not cap.isOpened():
-        raise FileNotFoundError(
-            f"No se pudo abrir el video: {ruta}"
-        )
-
-    fps = cap.get(cv2.CAP_PROP_FPS)
-
-    total = int(
-        cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    )
-
-    if (
-        not np.isfinite(fps)
-        or fps <= 0
-        or total <= 0
-    ):
-        cap.release()
-        raise ValueError(
-            "FPS o cantidad de frames invalidos"
-        )
-
-    indices = np.linspace(
-        0,
-        total - 1,
-        15,
-        dtype=int
-    )
-
-    candidatos = []
-
-    try:
-
-        for indice in indices:
-
-            cap.set(
-                cv2.CAP_PROP_POS_FRAMES,
-                int(indice)
-            )
-
-            ok, frame = cap.read()
-
-            if not ok:
-                continue
-
-            gris = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            alto, ancho = gris.shape
-
-            zona = (
-                0.10 * ancho,
-                0.90 * ancho,
-                0.15 * alto,
-                0.85 * alto
-            )
-
-            rango = (
-                0.012 * ancho,
-                0.08 * ancho
-            )
-
-            candidato = _detectar_centro_pupila(
-                gris,
-                zona,
-                rango,
-                n_radios=8
-            )
-
-            if candidato is not None:
-
-                candidato["indice"] = int(indice)
-
-                candidatos.append(candidato)
-
-    finally:
-
-        cap.release()
-
-    if len(candidatos) < 3:
-        raise ValueError(
-            "No se encontraron suficientes candidatos "
-            "para localizar la pupila automaticamente"
-        )
-
-    # Consenso espacial: mismo criterio del Modulo 3
-
-    cxs = np.array([
-        c["cx"] for c in candidatos
-    ])
-
-    cys = np.array([
-        c["cy"] for c in candidatos
-    ])
-
-    radios = np.array([
-        c["radio"] for c in candidatos
-    ])
-
-    mediana_x = np.median(cxs)
-    mediana_y = np.median(cys)
-    mediana_r = np.median(radios)
-
-    cerca = (
-        np.hypot(
-            cxs - mediana_x,
-            cys - mediana_y
-        ) <= mediana_r
-    )
-
-    if cerca.sum() < 3:
-        raise ValueError(
-            "No se encontro una posicion pupilar "
-            "consistente entre los frames"
-        )
-
-    validos = [
-        c
-        for c, es_cercano in zip(candidatos, cerca)
-        if es_cercano
-    ]
-
-    # Elegir una deteccion representativa del consenso
-
-    cx_med = float(
-        np.median([c["cx"] for c in validos])
-    )
-
-    cy_med = float(
-        np.median([c["cy"] for c in validos])
-    )
-
-    radio_med = float(
-        np.median([c["radio"] for c in validos])
-    )
-
-    elegido = min(
-        validos,
-        key=lambda c: (
-            np.hypot(
-                c["cx"] - cx_med,
-                c["cy"] - cy_med
-            )
-            + abs(c["radio"] - radio_med)
-        )
-    )
-
-    cap = cv2.VideoCapture(str(ruta))
-
-    try:
-
-        cap.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            elegido["indice"]
-        )
-
-        ok, frame = cap.read()
-
-    finally:
-
-        cap.release()
-
-    if not ok:
-        raise ValueError(
-            "No se pudo recuperar el frame seleccionado"
-        )
-
-    alto, ancho = frame.shape[:2]
-
-    cx = int(round(elegido["cx"]))
-    cy = int(round(elegido["cy"]))
-
-    radio = float(elegido["radio"])
-
-    # Recorte con margen suficiente para ver
-    # la pupila y parte del iris.
-
-    margen = max(
-        35,
-        int(round(2.5 * radio))
-    )
-
-    x1 = max(0, cx - margen)
-    x2 = min(ancho, cx + margen + 1)
-
-    y1 = max(0, cy - margen)
-    y2 = min(alto, cy + margen + 1)
-
-    roi = frame[y1:y2, x1:x2].copy()
-
-    if roi.size == 0:
-        raise ValueError(
-            "La ROI inicial quedo vacia"
-        )
-
-    roi_gris = cv2.cvtColor(
-        roi,
-        cv2.COLOR_BGR2GRAY
-    )
-
-    # Reutilizar la segmentacion que ya probamos
-    # con la ROI corregida y que te dio buen resultado.
-
-    mascara = crear_mascara_corregida(roi)
-
-    # Guardar diagnostico sobre el frame completo
-
-    if debug_dir is not None:
-
-        debug_dir = Path(debug_dir)
-
-        debug_dir.mkdir(
-            parents=True,
-            exist_ok=True
-        )
-
-        vista = frame.copy()
-
-        cv2.rectangle(
-            vista,
-            (x1, y1),
-            (x2 - 1, y2 - 1),
-            (0, 255, 0),
-            2
-        )
-
-        cv2.circle(
-            vista,
-            (cx, cy),
-            max(1, int(round(radio))),
-            (0, 255, 255),
-            2
-        )
-
-        cv2.imwrite(
-            str(
-                debug_dir /
-                "seleccion_roi_sobre_frame.jpg"
-            ),
-            vista
-        )
-
-    print(
-        f"Semilla inicial: centro=({cx}, {cy}), "
-        f"radio={radio:.1f} px"
-    )
-
-    print(
-        f"Frames consistentes: "
-        f"{len(validos)}/{len(indices)}"
-    )
-
-    segundo = elegido["indice"] / fps
-
-    return (
-        frame,
-        roi,
-        roi_gris,
-        mascara,
-        segundo
-    )
-
+EXTENSIONES_VIDEO = {".mov", ".mp4", ".avi", ".mkv", ".m4v"}
+
+# Columnas de la hoja "Curva" (una fila por frame)
+COLUMNAS_CURVA = [
+    "frame",
+    "tiempo_s",
+    "area_px2",
+    "diametro_px",
+    "area_original_px2",
+    "diametro_original_px",
+    "detectada"
+]
+
+NOMBRES_DE_RESULTADO = ("resultados.xlsx", "parametros.csv")
 
 
 # ============================================================
-# GRAFICOS
+# GRAFICO Y VIDEO DE REVISION
 # ============================================================
 
 def guardar_curva(serie, destino):
@@ -565,10 +136,6 @@ def guardar_curva(serie, destino):
     fig.savefig(destino, dpi=140)
     plt.close(fig)
 
-
-# ============================================================
-# VIDEO CON DETECCION SUPERPUESTA
-# ============================================================
 
 def guardar_video_revision(video_path, mediciones, destino):
 
@@ -729,367 +296,257 @@ def guardar_video_revision(video_path, mediciones, destino):
         cap.release()
         writer.release()
 
-
-
 # ============================================================
-# ROI CORREGIDA A PARTIR DEL SEGUIMIENTO DEL MODULO 3
+# ARCHIVO DE RESULTADOS: PARAMETROS (UNA VEZ) + CURVA
 # ============================================================
 
-def guardar_roi_desde_seguimiento(video_path, mediciones, carpeta):
+def construir_curva(serie, mediciones):
+    """Curva frame a frame: area y diametro de la pupila."""
+
+    curva = pd.DataFrame({
+        "frame": mediciones["frame"].to_numpy(),
+        "tiempo_s": serie["tiempo_s"].to_numpy(),
+        "area_px2": serie["area_procesada_px2"].to_numpy(),
+        "diametro_px": serie["diametro_procesado_px"].to_numpy(),
+        "area_original_px2": serie["area_original_px2"].to_numpy(),
+        "diametro_original_px": serie["diametro_original_px"].to_numpy(),
+        "detectada": mediciones["detectada"].to_numpy()
+    })
+
+    return curva[COLUMNAS_CURVA]
+
+
+def construir_parametros(parametros, curva, tipo_registro, video):
+    """Parametros fisiologicos, una sola vez.
+
+    Devuelve (principales, registro): listas de (nombre, valor, unidad).
+    Un valor None significa que no se pudo calcular.
     """
-    Obtiene una ROI centrada en una deteccion valida del
-    seguimiento pupilar del Modulo 3.
 
-    No utiliza la ROI inicial que selecciono HoughCircles.
-    """
+    p = parametros.iloc[0]
 
-    validas = mediciones[
-        mediciones["detectada"] == 1
-    ].copy()
+    def numero(campo):
+        v = pd.to_numeric(p.get(campo, np.nan), errors="coerce")
+        return float(v) if pd.notna(v) else None
 
-    validas = validas.dropna(
-        subset=["centro_x", "centro_y", "diametro_px"]
+    basal = numero("area_basal_px2")
+    amplitud = numero("amplitud_px2")
+
+    amplitud_pct = (
+        100.0 * amplitud / basal
+        if basal is not None and amplitud is not None and basal > 0
+        else None
     )
 
-    validas = validas[
-        validas["diametro_px"] > 0
+    principales = [
+        ("Latencia", numero("latencia_s"), "s"),
+        ("Amplitud de constricción", amplitud, "px²"),
+        ("Amplitud de constricción (% del área basal)", amplitud_pct, "%"),
+        ("Velocidad de constricción", numero("velocidad_constriccion_px2_s"), "px²/s"),
+        ("Velocidad de redilatación", numero("velocidad_redilatacion_px2_s"), "px²/s"),
+        ("Estado del cálculo", str(p.get("estado", "")), "")
     ]
 
-    if validas.empty:
-        raise RuntimeError(
-            "No hay detecciones validas para obtener la ROI corregida"
-        )
+    registro = [
+        ("Video", video.name, ""),
+        ("Método de segmentación", f"{METODO} + {MORFOLOGIA}", ""),
+        ("Tipo de registro (A: la luz se enciende, B: la luz se apaga)", tipo_registro or None, ""),
+        ("Encendido de la luz", numero("tiempo_estimulo_s"), "s"),
+        ("Apagado de la luz", numero("tiempo_apagado_s"), "s"),
+        ("Área basal (antes del estímulo)", basal, "px²"),
+        ("Área mínima (durante la constricción)", numero("area_minima_px2"), "px²"),
+        ("Frames totales", int(len(curva)), ""),
+        ("Frames con pupila detectada", int(curva["detectada"].sum()), "")
+    ]
 
-    # Elegir un frame representativo dentro del seguimiento
-    fila = validas.iloc[len(validas) // 2]
-
-    indice = int(fila["frame"])
-    cx = int(round(float(fila["centro_x"])))
-    cy = int(round(float(fila["centro_y"])))
-    diametro = float(fila["diametro_px"])
-
-    radio = diametro / 2.0
-
-    cap = cv2.VideoCapture(str(video_path))
-
-    if not cap.isOpened():
-        raise RuntimeError("No se pudo abrir el video")
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, indice)
-    ok, frame = cap.read()
-    cap.release()
-
-    if not ok:
-        raise RuntimeError(
-            "No se pudo leer el frame seleccionado"
-        )
-
-    alto, ancho = frame.shape[:2]
-
-    if not (0 <= cx < ancho and 0 <= cy < alto):
-        raise RuntimeError(
-            "El centro detectado esta fuera del frame"
-        )
-
-    # Incluir la pupila y parte del iris
-    margen = max(35, int(round(2.5 * radio)))
-
-    x1 = max(0, cx - margen)
-    x2 = min(ancho, cx + margen + 1)
-
-    y1 = max(0, cy - margen)
-    y2 = min(alto, cy + margen + 1)
-
-    roi_corregida = frame[y1:y2, x1:x2].copy()
-
-    if roi_corregida.size == 0:
-        raise RuntimeError("La ROI corregida quedo vacia")
-
-    # Guardar recorte corregido
-    cv2.imwrite(
-        str(carpeta / "roi_corregida.png"),
-        roi_corregida
-    )
-
-    # Mostrar donde se ubica la ROI sobre el frame
-    vista = frame.copy()
-
-    cv2.rectangle(
-        vista,
-        (x1, y1),
-        (x2 - 1, y2 - 1),
-        (0, 255, 0),
-        2
-    )
-
-    cv2.circle(
-        vista,
-        (cx, cy),
-        max(1, int(round(radio))),
-        (0, 255, 0),
-        2
-    )
-
-    cv2.circle(
-        vista,
-        (cx, cy),
-        3,
-        (0, 255, 0),
-        -1
-    )
-
-    cv2.imwrite(
-        str(carpeta / "roi_corregida_sobre_frame.png"),
-        vista
-    )
-
-    print(
-        f"ROI corregida guardada usando el frame {indice}"
-    )
-
-    return roi_corregida
+    return principales, registro
 
 
-# ============================================================
-# MASCARA DE LA ROI CORREGIDA
-# ============================================================
+def _texto_valor(valor):
+    """Valor para mostrar en la hoja de parametros."""
 
-def crear_mascara_corregida(roi_corregida):
-    """
-    Segmenta la pupila dentro de la ROI obtenida
-    del seguimiento del Modulo 3.
+    if valor is None:
+        return "no calculado"
 
-    Devuelve una mascara binaria:
-    blanco = pupila
-    negro = resto de la imagen
+    if isinstance(valor, float):
+        return round(valor, 3)
+
+    return valor
+
+
+def guardar_resultados(carpeta, principales, registro, curva):
+    """Guarda resultados.xlsx (hojas Parametros y Curva).
+
+    Si no esta instalado openpyxl, guarda parametros.csv y curva.csv.
+    Devuelve los nombres de los archivos creados.
     """
 
-    gris = cv2.cvtColor(
-        roi_corregida,
-        cv2.COLOR_BGR2GRAY
-    )
+    curva_redondeada = curva.round(4)
 
-    gris_suave = cv2.GaussianBlur(
-        gris,
-        (5, 5),
-        0
-    )
+    try:
 
-    alto, ancho = gris.shape
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
 
-    cx = ancho // 2
-    cy = alto // 2
+    except ImportError:
 
-    # Limitamos la busqueda a la region central
-    # para evitar confundir iris y parpados con pupila.
-    radio_busqueda = max(
-        10,
-        int(min(alto, ancho) * 0.32)
-    )
+        filas = [
+            (nombre, _texto_valor(valor), unidad)
+            for nombre, valor, unidad in principales + registro
+        ]
 
-    yy, xx = np.ogrid[:alto, :ancho]
+        pd.DataFrame(
+            filas, columns=["Parametro", "Valor", "Unidad"]
+        ).to_csv(carpeta / "parametros.csv", index=False, encoding="utf-8-sig")
 
-    zona_central = (
-        (xx - cx) ** 2 +
-        (yy - cy) ** 2
-    ) <= radio_busqueda ** 2
+        curva_redondeada.to_csv(carpeta / "curva.csv", index=False)
 
-    # La pupila suele ser la region mas oscura.
-    radio_semilla = max(
-        4,
-        int(min(alto, ancho) * 0.09)
-    )
-
-    zona_semilla = (
-        (xx - cx) ** 2 +
-        (yy - cy) ** 2
-    ) <= radio_semilla ** 2
-
-    intensidad_semilla = float(
-        np.median(gris_suave[zona_semilla])
-    )
-
-    # Umbral conservador: cerca de la intensidad
-    # de la pupila, para no incluir todo el iris.
-    umbral = min(
-        100,
-        intensidad_semilla + 25
-    )
-
-    binaria = (
-        (gris_suave <= umbral) &
-        zona_central
-    ).astype(np.uint8)
-
-    # Unir pequeños huecos
-    kernel = cv2.getStructuringElement(
-        cv2.MORPH_ELLIPSE,
-        (5, 5)
-    )
-
-    binaria = cv2.morphologyEx(
-        binaria,
-        cv2.MORPH_CLOSE,
-        kernel
-    )
-
-    # Conservar solamente la componente
-    # oscura conectada al centro de la ROI.
-    cantidad, etiquetas, stats, centroides = (
-        cv2.connectedComponentsWithStats(
-            binaria,
-            8
-        )
-    )
-
-    componente = int(etiquetas[cy, cx])
-
-    if componente == 0:
-        raise RuntimeError(
-            "No se encontro una region oscura "
-            "en el centro de la ROI corregida"
+        print(
+            "\nAviso: no esta instalado openpyxl, por eso se guardaron "
+            "parametros.csv y curva.csv.\n"
+            "Para obtener un unico archivo Excel: pip install openpyxl"
         )
 
-    area = int(
-        stats[componente, cv2.CC_STAT_AREA]
+        return ["parametros.csv", "curva.csv"]
+
+    negrita = Font(bold=True)
+    relleno = PatternFill("solid", fgColor="DDEBF7")
+
+    libro = Workbook()
+
+    # ---- Hoja 1: parametros ----
+    hoja = libro.active
+    hoja.title = "Parametros"
+
+    hoja.append(["Parámetro", "Valor", "Unidad"])
+
+    for celda in hoja[1]:
+        celda.font = negrita
+        celda.fill = relleno
+
+    for nombre, valor, unidad in principales:
+        hoja.append([nombre, _texto_valor(valor), unidad])
+        hoja.cell(row=hoja.max_row, column=1).font = negrita
+
+    hoja.append([])
+    hoja.append(["Datos del registro", "", ""])
+
+    for celda in hoja[hoja.max_row]:
+        celda.font = negrita
+        celda.fill = relleno
+
+    for nombre, valor, unidad in registro:
+        hoja.append([nombre, _texto_valor(valor), unidad])
+
+    hoja.column_dimensions["A"].width = 58
+    hoja.column_dimensions["B"].width = 44
+    hoja.column_dimensions["C"].width = 8
+
+    # ---- Hoja 2: curva ----
+    hoja_curva = libro.create_sheet("Curva")
+
+    hoja_curva.append(list(curva_redondeada.columns))
+
+    for celda in hoja_curva[1]:
+        celda.font = negrita
+        celda.fill = relleno
+
+    filas = (
+        curva_redondeada
+        .astype(object)
+        .where(curva_redondeada.notna(), None)
+        .values
+        .tolist()
     )
 
-    if area < 50:
-        raise RuntimeError(
-            "La mascara corregida es demasiado pequena"
-        )
+    for fila in filas:
+        hoja_curva.append(fila)
 
-    mascara = np.where(
-        etiquetas == componente,
-        255,
-        0
-    ).astype(np.uint8)
+    hoja_curva.freeze_panes = "A2"
 
-    print(
-        f"Mascara corregida generada. "
-        f"Area: {area} px2"
-    )
+    for letra in "ABCDEFG":
+        hoja_curva.column_dimensions[letra].width = 20
 
-    return mascara
+    libro.save(carpeta / "resultados.xlsx")
+
+    return ["resultados.xlsx"]
+
 
 # ============================================================
 # EJECUCION PRINCIPAL
 # ============================================================
 
-def ejecutar():
+def ejecutar(video_path):
 
-    video = Path(VIDEO_PATH).expanduser().resolve()
+    video = Path(video_path).expanduser().resolve()
 
     if not video.is_file():
         raise FileNotFoundError(
             f"No existe el video: {video}"
         )
 
-    # Crear carpeta de resultados
+    # Carpeta de salida: se reemplaza por completo para no mezclar corridas
     carpeta = SALIDAS / video.stem
-    carpeta.mkdir(parents=True, exist_ok=True)
 
-    resultados = carpeta / "resultados"
-    resultados.mkdir(exist_ok=True)
+    if carpeta.exists():
+        shutil.rmtree(carpeta)
 
-    log_path = carpeta / "ejecucion.txt"
+    extras = carpeta / "extras"
+    resultados = extras / "resultados"
+    resultados.mkdir(parents=True)
 
     print(f"Video seleccionado: {video}")
+    print(f"Metodo de segmentacion: {METODO} + {MORFOLOGIA}")
 
     # ========================================================
-    # 1. ROI AUTOMATICA INICIAL
+    # 1. SEGUIMIENTO DE LA PUPILA Y PARAMETROS
     # ========================================================
 
-    print("\nInicializando ROI automatica...")
+    print("\nSiguiendo la pupila y calculando parametros...")
 
-    frame, roi, roi_gris, mascara, segundo = (
-        preparar_roi_automatica(
-            video,
-            debug_dir=carpeta / "diagnostico_roi"
-        )
-    )
-
-    cv2.imwrite(
-        str(carpeta / "roi_detectada.png"),
-        roi
-    )
-
-    cv2.imwrite(
-        str(carpeta / "mascara_inicial.png"),
-        mascara
-    )
-
-    print(f"ROI inicial: {segundo:.2f} s")
-
-    # ========================================================
-    # 2. MODULO 3
-    # ========================================================
-
-    print("\nProcesando Modulo 3...")
+    # Este script lee los archivos con los nombres del formato anterior
+    funciones_modulo3.GUARDAR_FORMATO_ANTERIOR = True
 
     log = io.StringIO()
-
-    mostrar_original = plt.show
-    plt.show = lambda *args, **kwargs: plt.close("all")
 
     try:
 
         with contextlib.redirect_stdout(log):
             with warnings.catch_warnings():
 
-                warnings.simplefilter(
-                    "ignore",
-                    RuntimeWarning
-                )
+                warnings.simplefilter("ignore", RuntimeWarning)
 
-                modulo3(
-                    frame,
-                    roi,
-                    roi_gris,
-                    mascara,
+                procesar_registros(
+                    video,
+                    resultados,
                     METODO,
                     MORFOLOGIA,
-                    video,
-                    carpeta
+                    modo="evaluacion",
+                    procesar_otros=False,
+                    mostrar_figuras=False
                 )
 
     finally:
 
-        plt.show = mostrar_original
         plt.close("all")
 
-        log_path.write_text(
+        (extras / "ejecucion.txt").write_text(
             log.getvalue(),
             encoding="utf-8"
         )
 
     # ========================================================
-    # 3. LEER LOS RESULTADOS DEL MODULO 3
+    # 2. ARCHIVO DE RESULTADOS
     # ========================================================
 
-    serie_csv = (
-        resultados /
-        f"serie_procesada_{video.stem}.csv"
-    )
+    serie_csv = resultados / f"serie_procesada_{video.stem}.csv"
+    mediciones_csv = resultados / f"mediciones_{video.stem}.csv"
+    parametros_csv = resultados / f"parametros_fisiologicos_{video.stem}.csv"
 
-    mediciones_csv = (
-        resultados /
-        f"mediciones_{video.stem}.csv"
-    )
-
-    parametros_csv = (
-        resultados /
-        f"parametros_fisiologicos_{video.stem}.csv"
-    )
-
-    for archivo in [
-        serie_csv,
-        mediciones_csv,
-        parametros_csv
-    ]:
+    for archivo in [serie_csv, mediciones_csv, parametros_csv]:
         if not archivo.exists():
             raise RuntimeError(
-                f"No se genero {archivo.name}"
+                f"No se genero {archivo.name}. Ver extras/ejecucion.txt"
             )
 
     serie = pd.read_csv(serie_csv)
@@ -1099,42 +556,33 @@ def ejecutar():
     if serie.empty or mediciones.empty or parametros.empty:
         raise RuntimeError("Se genero un CSV vacio")
 
-    # ========================================================
-    # 4. GUARDAR CURVAS Y PARAMETROS
-    # ========================================================
+    if len(serie) != len(mediciones):
+        raise RuntimeError(
+            "La serie y las mediciones tienen distinta cantidad de frames"
+        )
 
-    temporal = serie.merge(
-        mediciones[
-            [
-                "frame",
-                "tiempo_s",
-                "detectada",
-                "centro_x",
-                "centro_y",
-                "puntaje_deteccion"
-            ]
-        ],
-        on="tiempo_s",
-        how="left",
-        validate="one_to_one"
+    # Tipo de registro: A (la luz se enciende) o B (la luz se apaga)
+    tipo_registro = ""
+
+    try:
+
+        limpio = pd.read_csv(
+            resultados / f"parametros_{video.stem}.csv",
+            encoding="utf-8-sig"
+        )
+
+        tipo_registro = str(limpio.iloc[0]["tipo_registro"])
+
+    except Exception:
+        pass
+
+    curva = construir_curva(serie, mediciones)
+
+    principales, registro = construir_parametros(
+        parametros, curva, tipo_registro, video
     )
 
-    temporal = temporal.rename(
-        columns={
-            "area_procesada_px2": "area_px2",
-            "diametro_procesado_px": "diametro_px"
-        }
-    )
-
-    temporal.to_csv(
-        carpeta / "curva_pupilar.csv",
-        index=False
-    )
-
-    parametros.to_csv(
-        carpeta / "parametros_fisiologicos.csv",
-        index=False
-    )
+    archivos = guardar_resultados(carpeta, principales, registro, curva)
 
     guardar_curva(
         serie,
@@ -1142,46 +590,7 @@ def ejecutar():
     )
 
     # ========================================================
-    # 5. OBTENER ROI CORREGIDA
-    # ========================================================
-
-    print("\nObteniendo ROI desde el seguimiento...")
-
-   
-    try:
-
-        roi_corregida = guardar_roi_desde_seguimiento(
-            video,
-            mediciones,
-            carpeta
-        )
-
-        # Crear mascara de la pupila real
-        mascara_corregida = crear_mascara_corregida(
-            roi_corregida
-        )
-
-        # Guardar mascara corregida
-        cv2.imwrite(
-            str(carpeta / "mascara_corregida.png"),
-            mascara_corregida
-        )
-
-        print(
-            "ROI y mascara corregidas guardadas correctamente."
-        )
-
-    except Exception as exc:
-
-        print(
-            f"Aviso: no se pudo corregir ROI o mascara: {exc}"
-        )
-
-        roi_corregida = None
-        mascara_corregida = None
-
-    # ========================================================
-    # 6. VIDEO DE REVISION
+    # 3. VIDEO DE REVISION (si falla, solo se avisa)
     # ========================================================
 
     print("\nGenerando video de revision...")
@@ -1191,149 +600,138 @@ def ejecutar():
         guardar_video_revision(
             video,
             mediciones,
-            carpeta / "revision_pupila.mp4"
+            extras / "revision_pupila.mp4"
         )
 
     except Exception as exc:
 
-        print(
-            f"No se pudo generar el video de revision: {exc}"
-        )
+        print(f"No se pudo generar el video de revision: {exc}")
 
     # ========================================================
-    # 7. MODULO 4
+    # 4. RESUMEN EN PANTALLA
     # ========================================================
-
-    print("\nProcesando Modulo 4...")
-
-    log4 = io.StringIO()
-
-    plt.show = lambda *args, **kwargs: plt.close("all")
-
-    try:
-
-        with contextlib.redirect_stdout(log4):
-
-            if roi_corregida is not None:
-
-                roi_corregida_gris = cv2.cvtColor(
-                    roi_corregida,
-                    cv2.COLOR_BGR2GRAY
-                )
-
-                analizar_imagen(
-                    roi_corregida_gris,
-                    nombre="ROI corregida externa"
-                )
-
-                comparar_diametro_jpeg(
-                    roi_corregida_gris
-                )
-
-            else:
-
-                print(
-                    "ROI corregida no disponible. "
-                    "Se omite su analisis."
-                )
-
-            # La mascara inicial proviene de otra
-            # deteccion, por lo que no la usamos
-            # como mascara de la ROI corregida.
-           
-            if mascara_corregida is not None:
-
-                analizar_imagen(
-                    mascara_corregida,
-                    nombre="Mascara pupilar corregida"
-                )
-
-                print(
-                    "Mascara corregida incluida "
-                    "en el analisis del Modulo 4."
-                )
-
-
-            # Frame completo del video externo
-            frame_gris = cv2.cvtColor(
-                frame,
-                cv2.COLOR_BGR2GRAY
-            )
-
-            analizar_imagen(
-                frame_gris,
-                nombre="Frame externo"
-            )
-
-    finally:
-
-        plt.show = mostrar_original
-        plt.close("all")
-
-        (
-            carpeta / "modulo4_compresion.txt"
-        ).write_text(
-            log4.getvalue(),
-            encoding="utf-8"
-        )
-
-    # ========================================================
-    # 8. RESUMEN FINAL
-    # ========================================================
-
-    estado = str(
-        parametros.iloc[0].get(
-            "estado",
-            "Desconocido"
-        )
-    )
 
     print("\n===== RESULTADOS =====")
 
-    print(f"Estado de parametros: {estado}")
+    for nombre, valor, unidad in principales:
+
+        texto = _texto_valor(valor)
+
+        print(f"{nombre}: {texto} {unidad}".rstrip())
+
+    print(f"Tipo de registro: {tipo_registro or 'no determinado'}")
 
     print(
-        f"Detecciones: "
-        f"{int(mediciones['detectada'].sum())}"
-        f"/{len(mediciones)} frames"
+        f"Frames con pupila detectada: "
+        f"{int(curva['detectada'].sum())}/{len(curva)}"
     )
-
-    for campo in [
-        "latencia_s",
-        "amplitud_px2",
-        "velocidad_constriccion_px2_s",
-        "velocidad_redilatacion_px2_s"
-    ]:
-
-        print(
-            f"{campo}: "
-            f"{parametros.iloc[0].get(campo, np.nan)}"
-        )
 
     print(f"\nResultados guardados en: {carpeta}")
 
     print(
-        "IMPORTANTE: revisar visualmente la ROI "
-        "y el seguimiento antes de interpretar "
+        f"  {' y '.join(archivos)}   parametros y curva (archivo principal)\n"
+        "  curva_pupilar.png   la curva como grafico\n"
+        "  extras/             video de revision, log y tablas internas"
+    )
+
+    print(
+        "IMPORTANTE: revisar visualmente el seguimiento "
+        "(extras/revision_pupila.mp4) antes de interpretar "
         "los parametros fisiologicos."
     )
 
 
 # ============================================================
-# INICIAR EL PROGRAMA
+# BUSQUEDA DE VIDEOS E INICIO DEL PROGRAMA
 # ============================================================
+
+def buscar_videos():
+    """Videos a procesar: los de la terminal (archivos o carpetas) o VIDEO_PATH."""
+
+    argumentos = sys.argv[1:]
+
+    if argumentos:
+
+        rutas = [Path(a).expanduser() for a in argumentos]
+
+    else:
+
+        ruta = Path(VIDEO_PATH).expanduser()
+
+        # Una ruta relativa se interpreta desde la carpeta del repositorio
+        if not ruta.is_absolute():
+            ruta = RAIZ / ruta
+
+        rutas = [ruta]
+
+    videos = []
+
+    for ruta in rutas:
+
+        if ruta.is_dir():
+
+            videos += sorted(
+                p for p in ruta.iterdir()
+                if p.is_file() and p.suffix.lower() in EXTENSIONES_VIDEO
+            )
+
+        else:
+
+            # Si no existe, ejecutar() avisa con un error claro
+            videos.append(ruta)
+
+    return videos
+
 
 if __name__ == "__main__":
 
-    try:
-        ejecutar()
+    videos = buscar_videos()
 
-    except Exception as exc:
+    if not videos:
 
-        print(
-            f"ERROR EN VALIDACION EXTERNA: {exc}"
-        )
+        print("No se encontraron videos para procesar en la carpeta indicada.")
 
-        traceback.print_exc()
+        raise SystemExit(1)
+
+    errores = []
+
+    for video in videos:
+
+        print(f"\n{'=' * 60}\nVIDEO: {video.name}\n{'=' * 60}")
+
+        try:
+
+            ejecutar(video)
+
+        except Exception as exc:
+
+            errores.append((video.name, str(exc)))
+
+            print(f"ERROR EN {video.name}: {exc}")
+
+            traceback.print_exc()
+
+            # No dejar una carpeta incompleta de un video que fallo
+            fallida = SALIDAS / video.stem
+
+            if (
+                fallida.exists()
+                and not any((fallida / n).exists() for n in NOMBRES_DE_RESULTADO)
+            ):
+                shutil.rmtree(fallida, ignore_errors=True)
+
+    if errores:
+
+        print("\nNo se pudieron procesar:")
+
+        for nombre, motivo in errores:
+            print(f"  - {nombre}: {motivo}")
+
+        if any(m.startswith("No existe el video") for _, m in errores):
+            print(
+                "\nCambiar la ruta de VIDEO_PATH en src/probar_video_externo.py, "
+                "o pasarla al ejecutar:\n"
+                "  python3 src/probar_video_externo.py ruta/al/video.mov"
+            )
 
         raise SystemExit(1)

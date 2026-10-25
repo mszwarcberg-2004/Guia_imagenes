@@ -12,7 +12,7 @@ from funciones_modulo4 import analizar_imagen, comparar_diametro_jpeg
 
 #Constantes
 CARPETA_PROYECTO = Path.cwd()
-VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mp4"
+VIDEO_PATH = CARPETA_PROYECTO / "datos" / "Videos_ojo" / "video5.mov"
 CARPETA_IMAGENES = CARPETA_PROYECTO / "imagenes"
 ROI_PATH = CARPETA_IMAGENES / "roi.png"
 REFERENCIA_PATH = CARPETA_IMAGENES / "mascara_referencia.png"

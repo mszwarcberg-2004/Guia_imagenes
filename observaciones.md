@@ -1,587 +1,331 @@
-
 # Observaciones y resultados — TP Imágenes Biomédicas
+
+Video de trabajo: `video5.mov` (59,97 FPS, 12,14 s). La ROI (241 × 161 px) y el contorno de referencia a mano se hicieron sobre un frame de este video.
+
+---
 
 ## Módulo 1. Procesamiento de imágenes
 
 ### 1.1 Carga, muestreo y espacios de color
 
-#### 1.1.1 Extracción del frame y selección de la ROI
+**Frame y ROI.** Tomamos un frame del video y recortamos una ROI alrededor de la pupila y parte del iris. En el frame completo se ve bien el ojo y la ROI muestra el contorno de la pupila con más detalle. Cerca del borde de la pupila hay un reflejo del flash que puede complicar la detección de bordes y la segmentación.
 
-Se trabajó con un frame representativo del video seleccionado y una región de interés (ROI) centrada en la pupila y parte del iris, para estudiar las estructuras de interés.
+**Dimensiones y bits.** La ROI mide 241 × 161 px, con 3 canales (RGB) y 8 bits por canal, es decir 24 bits por píxel. La pupila ocupa unos 70 px de diámetro (ver 3.1.1), suficiente para delimitar su borde.
 
-**Aclaración:** En la ejecución actual se seleccionó `video5.mp4`, pero el programa cargó `imagenes/roi.png` porque ya existía una ROI guardada. Por eso, los análisis de ROI y máscara deben interpretarse como resultados de esas imágenes guardadas hasta verificar que efectivamente proceden del mismo video. El análisis temporal del Módulo 3 sí se realizó sobre `video5.mp4`.
+**Submuestreo.**
 
-**Observaciones:**
+| Resolución | Tamaño | Qué se ve |
+|---|---|---|
+| 100 % | 241 × 161 | Pupila e iris distinguibles, algo pixelada |
+| 50 % | 120 × 80 | Pupila reconocible, bordes menos definidos |
+| 25 % | 60 × 40 | Contorno irregular, casi sin textura |
+| 5 % | 12 × 8 | No se distingue nada |
 
-En el frame completo se distingue claramente el ojo, mientras que la ROI permite observar con mayor detalle la pupila y su contorno.
+Al bajar la resolución se pierde primero el contorno y después la forma de la pupila, así que con poca resolución las mediciones de área y diámetro serían mucho menos precisas.
 
-Sin embargo, se identifica un reflejo luminoso sobre el borde izquierdo de la pupila, que podría interferir en las etapas posteriores de detección de bordes y segmentación. Además, la ROI presenta una resolución relativamente baja, lo que limita la definición de algunos detalles.
+**Cuantización.** Con 4 bits las transiciones se vuelven más bruscas, pero la pupila se reconoce bien. Con 2 bits quedan zonas planas y casi sin textura, aunque la forma general se mantiene. Cuantizar reduce los niveles de gris, no la cantidad de píxeles.
 
-#### 1.1.2 Dimensiones y profundidad de bits
+**Espacios de color.** En RGB la pupila es oscura en los tres canales, las diferencias entre canales son chicas y el reflejo aparece en todos. En HSV, H es ruidoso donde hay poca saturación, S muestra variaciones entre regiones y V es la que mejor separa la pupila del iris. En V el reflejo sigue muy brillante, así que cambiar de espacio de color no lo elimina.
 
-Se analizaron las dimensiones, la cantidad de canales y la profundidad de bits de la ROI original.
-
-Se obtuvo una imagen de **85 × 56 píxeles**, con tres canales de color (RGB) y una profundidad de **8 bits por canal**, equivalente a 24 bits por píxel.
-
-Estas características permiten representar 256 niveles de intensidad por canal, aunque la resolución espacial limitada puede dificultar la delimitación precisa de la pupila.
-
-#### 1.1.3 Resolución espacial: submuestreo
-
-Se redujo la resolución espacial de la ROI al 50%, 25% y 5% de sus dimensiones originales, con el objetivo de evaluar la pérdida de definición.
-
-**Observaciones:**
-
-- **Resolución original (85 × 56):** permite distinguir la pupila, su contorno y algunas características del iris, aunque la imagen ya presenta cierta pixelación.
-- **Resolución al 50% (42 × 28):** la pupila sigue siendo reconocible, pero se pierden detalles finos y disminuye la definición de los bordes.
-- **Resolución al 25% (21 × 14):** aumenta considerablemente la pixelación, el contorno pupilar se vuelve más irregular y se pierde gran parte de la textura del iris.
-- **Resolución al 5% (4 × 3):** la imagen queda reducida a unos pocos píxeles y prácticamente desaparece la información necesaria para distinguir las estructuras oculares.
-
-Por lo tanto, **a medida que disminuye la resolución espacial, se pierde información sobre la forma y los detalles de la pupila**. Esto es especialmente importante para el procesamiento posterior, ya que una resolución insuficiente puede afectar la precisión de las mediciones de área y diámetro pupilar.
-
-#### 1.1.4 Cuantización: profundidad de bits
-
-Se redujo la profundidad de bits de la ROI original de 8 bits a 4 bits y 2 bits por canal, disminuyendo la cantidad de niveles de intensidad disponibles.
-
-**Observaciones:**
-
-- **8 bits:** la imagen presenta transiciones de intensidad relativamente suaves y permite distinguir la pupila del iris.
-- **4 bits:** se observan cambios más bruscos entre tonalidades y una pérdida moderada de detalles, aunque la pupila continúa siendo reconocible.
-- **2 bits:** aparece una degradación considerable de los colores y las intensidades, con regiones más uniformes y transiciones abruptas entre niveles. Se pierde gran parte de la información de textura.
-
-A diferencia del submuestreo espacial, la cuantización no reduce la cantidad de píxeles, sino la cantidad de intensidades que puede representar cada uno.
-
-En este caso, **la reducción a 2 bits genera una pérdida importante de información visual**, aunque la forma general de la pupila todavía puede distinguirse.
-
-#### 1.1.5 Espacios de color
-
-Se separó la ROI en sus tres canales RGB y se realizó la conversión al espacio HSV, visualizando las componentes H (Matiz), S (Saturación) y V (Valor) de manera independiente.
-
-**Observaciones:**
-
-**Canales RGB:**
-
-Los tres canales permiten identificar la pupila como una región oscura y distinguirla del iris. Sin embargo, presentan diferencias de intensidad y contraste según la componente de color analizada.
-
-En las imágenes obtenidas, las diferencias entre los canales no son demasiado pronunciadas y el reflejo luminoso aparece claramente en los tres.
-
-**Espacio HSV:**
-
-- **H (Matiz):** representa las diferencias de tonalidad. Se observan variaciones entre la región pupilar y el iris, aunque el resultado presenta zonas con cambios bruscos debido a la baja saturación de algunos píxeles.
-- **S (Saturación):** representa la intensidad o pureza del color y permite distinguir variaciones de saturación entre distintas regiones del iris y la pupila.
-- **V (Valor):** representa el brillo de los píxeles. La pupila se observa como una región oscura, mientras que el reflejo luminoso presenta una intensidad elevada.
-
-En esta ROI, **la componente V permite distinguir visualmente la pupila del iris de manera más clara**, ya que conserva las diferencias de luminosidad entre ambas estructuras.
-
-Sin embargo, el reflejo sigue apareciendo como una región muy brillante, por lo que la conversión de espacio de color no elimina este artefacto.
-
-#### Conclusiones generales del apartado 1.1
-
-A partir de las comparaciones realizadas, se observó que tanto la resolución espacial como la profundidad de bits influyen en la cantidad de información disponible para analizar la pupila.
-
-El submuestreo produjo una pérdida progresiva de definición, mientras que la reducción de la cuantización generó transiciones de intensidad más abruptas y una disminución de los detalles de textura.
-
-Por otra parte, la comparación de los espacios de color permitió identificar diferencias en la representación de las estructuras oculares. En particular, la componente V del espacio HSV resultó útil para distinguir las regiones oscuras de la pupila respecto del iris.
-
-En conjunto, estos resultados muestran la importancia de **conservar una resolución y profundidad de bits suficientes para preservar el contorno pupilar**, especialmente considerando que la ROI original ya presenta una resolución limitada y reflejos luminosos que pueden dificultar su procesamiento posterior.
+En resumen, hay que conservar resolución y profundidad de bits suficientes para no perder el contorno de la pupila, y los reflejos del flash van a seguir siendo un problema en las etapas siguientes.
 
 ### 1.2 Calidad, transformaciones de intensidad y filtrado espacial
 
-#### 1.2.1 Histograma, brillo y contraste
+**Brillo y contraste.** Sumar 50 desplaza el histograma hacia la derecha y multiplicar por 1,5 lo ensancha. En los dos casos muchos píxeles llegan a 255 y se saturan, y esa información no se recupera.
 
-Se calculó el histograma del frame completo en escala de grises y se aplicaron dos transformaciones: aumento de brillo mediante la suma de 50 unidades y modificación del contraste mediante la multiplicación de las intensidades por 1,5.
+**Escalado por rango de interés.** Usamos los percentiles 5 y 95 de la ROI (f1 = 8 y f2 = 129) y expandimos ese intervalo a 0–255. Se separa mejor la pupila del iris, pero se saturan algunas zonas del iris y se pierde textura.
 
-En ambos casos, el histograma se desplazó hacia intensidades mayores y se observa mucha saturación, debido a que numerosos píxeles alcanzaron el valor máximo de 255, provocando pérdida de información.
+**Ecualización.** El escalado lineal satura algunas regiones. La ecualización global mejora mucho el contraste, pero deja zonas muy claras y exagera algunas texturas. CLAHE mejora menos, pero conserva mejor el detalle del iris: es el resultado más equilibrado para esta ROI. No vemos ruido marcado a simple vista, aunque la imagen tiene reflejos.
 
-#### 1.2.2 Escalado lineal por rango de interés
+**Ruido y filtros.** Probamos media, mediana y gaussiano (3 × 3) y simulamos ruido gaussiano, sal y pimienta y speckle. La media suaviza pero desdibuja el borde de la pupila, la mediana es la más útil contra sal y pimienta, y el gaussiano reduce variaciones suaves a costa de algo de detalle fino. Ningún filtro elimina el reflejo del flash.
 
-Se seleccionaron automáticamente los límites del intervalo utilizando los percentiles 5 y 95 de las intensidades de la ROI en escala de grises, para que el intervalo seleccionado contenga aproximadamente el 90% central de los valores de intensidad, excluyendo los extremos de la distribución.
+### 1.3 Bordes y dominio frecuencial
 
-Se obtuvieron los siguientes valores:
+**Detección de bordes.** Aplicamos los cinco operadores a la ROI original y a la filtrada con gaussiano.
 
-- f1 = 34
-- f2 = 98
+| Operador | Resultado |
+|---|---|
+| Roberts | Detecta el contorno, pero también el reflejo y variaciones del iris |
+| Sobel y Prewitt | Parecidos entre sí, bordes gruesos |
+| Laplaciano | Contorno poco definido y muchos detalles extra |
+| Canny | Contorno fino y casi cerrado; también marca el reflejo |
 
-El intervalo seleccionado se expandió linealmente al rango de 0 a 255, aumentando la separación entre intensidades de la pupila y el iris. A los valores menores a f1 se les asignó 0 y a los mayores a f2, 255.
+Canny es el mejor para identificar el borde. El filtro gaussiano previo no mejora la continuidad del contorno.
 
-Sin embargo, se observó saturación en algunas regiones del iris, lo que produjo pérdida de detalles de textura.
+**Fourier 2D.** La magnitud se concentra en el centro del espectro, o sea en las bajas frecuencias. Si reconstruimos solo con la magnitud, la imagen deja de ser reconocible; con solo la fase se conservan los contornos. Al cruzar magnitud y fase de la imagen original y la filtrada, el resultado se parece a la imagen de la que viene la fase, y como las dos son muy parecidas los cruces quedan casi iguales a la ROI original. Es la fase la que guarda la información estructural.
 
-#### 1.2.3 Ecualización global y CLAHE
+**PSD.** La potencia está concentrada en las bajas frecuencias y el filtro gaussiano reduce las altas. Pero el borde de la pupila también es de alta frecuencia, así que filtrar más no garantiza detectar mejor la pupila.
 
-Se aplicaron dos métodos de ecualización sobre la ROI en escala de grises:
+**Filtrado en frecuencia.** Usamos filtros ideales con corte en el 10 % del lado menor del frame. El pasa-bajos suaviza todo, pierde pestañas y textura del iris y produce *ringing* alrededor de los bordes fuertes, típico del filtro ideal. El pasa-altos resalta bordes (ojo, pestañas, pupila). El gaussiano espacial suaviza menos y conserva mejor la definición, así que con estos parámetros es preferible al pasa-bajos ideal.
 
-- **Ecualización global:** redistribuye las intensidades utilizando el histograma de toda la imagen, aplicando la misma transformación a todos los píxeles.
-- **CLAHE:** divide la imagen en regiones pequeñas y realiza una ecualización local, limitando la amplificación del contraste para reducir la aparición de ruido y artefactos.
-
-**Observaciones:**
-
-- **Escalado lineal:** aumenta la separación de intensidades entre la pupila y el iris, pero produce saturación y pérdida de detalles en algunas regiones.
-- **Ecualización global:** mejora considerablemente el contraste y distribuye las intensidades en un rango más amplio, aunque también genera zonas muy claras y puede exagerar algunas texturas.
-- **CLAHE:** produce una mejora más moderada del contraste, conservando mejor los detalles del iris y evitando una saturación tan marcada.
-
-En esta ROI, **CLAHE presenta el resultado visual más equilibrado**, ya que mejora el contraste local sin generar cambios tan bruscos de intensidad. Sin embargo, la imagen sigue presentando reflejos luminosos y cierta falta de definición.
-
-Con respecto al ruido, no se observa un ruido muy marcado, aunque la imagen tiene poca resolución y algunos reflejos luminosos. Eso no significa que no tenga ruido, sino que no podemos distinguirlo claramente a simple vista.
-
-#### 1.2.4 Ruido y filtrado espacial
-
-Se comparó la ROI original con versiones filtradas mediante media, mediana y gaussiano (ventanas 3 × 3). Además, se simularon ruido gaussiano, impulsivo (sal y pimienta) y speckle, y se aplicaron filtros espaciales para evaluar su atenuación.
-
-**Observaciones:**
-
-- **Filtro de media:** suaviza variaciones locales, pero también puede desdibujar el borde de la pupila.
-- **Filtro de mediana:** resulta especialmente útil para atenuar el ruido impulsivo.
-- **Filtro gaussiano:** reduce fluctuaciones suaves a costa de cierta pérdida de detalles finos.
-
-En las imágenes con ruido simulado, los filtros atenúan parcialmente las alteraciones introducidas, pero ninguno elimina el reflejo luminoso intenso sin modificar otras estructuras.
-
-No se cuenta con una imagen real libre de ruido para cuantificar la eliminación de ruido original. La evaluación se basa en comparaciones visuales y en las métricas PSNR/SSIM expuestas más adelante, que cuantifican similitud respecto de la ROI original, pero no garantizan una mejor segmentación.
-
-### 1.3 Detección de bordes y dominio frecuencial
-
-#### 1.3.1 Detección de bordes
-
-Se aplicaron los operadores Roberts, Sobel, Prewitt, Laplaciano y Canny sobre la ROI original y sobre la ROI filtrada mediante un filtro gaussiano de 3 × 3, para comparar la detección y continuidad del contorno pupilar.
-
-**Observaciones:**
-
-- **Roberts:** permite identificar el contorno de la pupila, aunque también resalta el reflejo luminoso y algunas variaciones de intensidad del iris.
-- **Sobel y Prewitt:** presentan resultados similares, detectando claramente el contorno pupilar, aunque con bordes relativamente gruesos.
-- **Laplaciano:** resalta variaciones bruscas de intensidad, pero el contorno de la pupila aparece menos definido y se detectan detalles adicionales.
-- **Canny:** produce el contorno más fino y prácticamente continuo, aunque también identifica bordes correspondientes a los reflejos luminosos.
-
-Al comparar la imagen original con la filtrada, se observa que el filtro gaussiano suaviza algunas variaciones de intensidad y reduce detalles pequeños. Sin embargo, no produce una mejora significativa en la continuidad del contorno pupilar.
-
-En esta ROI, **Canny presenta el resultado más conveniente para identificar el borde de la pupila**, ya que genera un contorno delgado y prácticamente cerrado.
-
-#### 1.3.2 Transformada de Fourier 2D
-
-Se calculó la Transformada de Fourier 2D de la ROI original y se representó su magnitud en escala logarítmica y su fase.
-
-Luego, se reconstruyó la imagen mediante la transformada inversa utilizando únicamente la magnitud, únicamente la fase y combinando magnitudes y fases de la ROI original y la filtrada con gaussiano.
-
-**Observaciones:**
-
-- **Magnitud:** presenta una mayor concentración de valores en la región central del espectro, lo que indica un predominio de bajas frecuencias espaciales.
-- **Fase:** presenta una distribución visualmente desordenada, pero contiene información importante sobre la organización espacial de las estructuras.
-- **Reconstrucción con solo magnitud:** se pierde gran parte de la estructura reconocible de la imagen, por lo que la pupila deja de distinguirse claramente.
-- **Reconstrucción con solo fase:** se conservan algunos contornos y características estructurales, aunque se pierde la apariencia original de las intensidades.
-- **Reconstrucciones cruzadas:** al combinar la magnitud de una imagen con la fase de la otra, se obtienen resultados muy similares a la ROI original, debido a que el filtrado gaussiano no modifica considerablemente la organización espacial de la imagen.
-
-Por lo tanto, **la fase resulta fundamental para conservar la información estructural y la ubicación de los elementos de la imagen**, mientras que la magnitud aporta información sobre la amplitud de las componentes frecuenciales.
-
-#### 1.3.3 Densidad espectral de potencia (PSD)
-
-Se calculó la densidad espectral de potencia como el cuadrado de la magnitud de la Transformada de Fourier, comparando la ROI original con la ROI filtrada mediante gaussiano.
-
-**Observaciones:**
-
-En ambas imágenes se observa una mayor concentración de potencia en el centro del espectro, correspondiente a las bajas frecuencias espaciales.
-
-Después del filtrado gaussiano, las regiones alejadas del centro presentan una menor intensidad, lo que indica una disminución de las componentes de alta frecuencia.
-
-Esto es consistente con el efecto suavizante del filtro gaussiano, que atenúa variaciones rápidas de intensidad asociadas tanto al ruido como a los detalles finos de la imagen.
-
-Sin embargo, **la reducción de altas frecuencias no implica necesariamente una mejor detección de la pupila**, ya que sus bordes también contienen información de alta frecuencia.
-
-#### 1.3.4 Filtrado en el dominio frecuencial
-
-Se diseñaron filtros pasa-bajos y pasa-altos ideales en el dominio frecuencial y se reconstruyó el frame completo mediante la Transformada Inversa de Fourier. Los resultados se compararon con el filtrado gaussiano espacial.
-
-**Observaciones:**
-
-- **Filtro pasa-bajos frecuencial:** produce un suavizado general de la imagen, disminuyendo la definición de detalles finos como las pestañas y las texturas del iris.
-- **Filtro pasa-altos frecuencial:** resalta los bordes y las transiciones bruscas de intensidad, incluyendo los contornos del ojo, las pestañas y la pupila.
-- **Filtro gaussiano espacial:** genera un suavizado más moderado que el pasa-bajos frecuencial utilizado, conservando mejor la definición general de las estructuras.
-
-En las máscaras frecuenciales, el filtro pasa-bajos conserva las frecuencias cercanas al centro del espectro, mientras que el pasa-altos conserva las frecuencias alejadas del centro.
-
-También se observan algunas oscilaciones alrededor de bordes de alto contraste en el resultado del pasa-bajos, compatibles con el efecto *ringing* característico de los filtros ideales.
-
-En esta comparación, **el filtro gaussiano espacial conserva mejor los detalles de la imagen que el pasa-bajos frecuencial implementado**, aunque este resultado depende de los parámetros seleccionados para cada filtro.
-
-#### Evaluación cuantitativa mediante PSNR y SSIM
-
-Se calcularon las métricas PSNR y SSIM para comparar la ROI original con las imágenes obtenidas mediante los filtros espaciales de media, mediana y gaussiano.
-
-Se obtuvieron los siguientes resultados:
+**PSNR y SSIM** (cada filtro contra la ROI original):
 
 | Filtro | PSNR (dB) | SSIM |
 |---|---:|---:|
-| Media | 39,57 | 0,9769 |
-| Mediana | 42,42 | 0,9834 |
-| Gaussiano | 41,75 | 0,9858 |
+| Media | 39,04 | 0,9779 |
+| Mediana | 41,49 | 0,9851 |
+| Gaussiano | 41,27 | 0,9868 |
 
-**Observaciones:**
+La mediana tiene el mayor PSNR y el gaussiano el mayor SSIM; los tres quedan muy cerca de la original. Estas métricas miden parecido con la imagen original, no cuánto ruido o reflejo se eliminó.
 
-El filtro de mediana presentó el valor más alto de PSNR, lo que indica una menor diferencia de intensidad respecto de la ROI original. Por otro lado, el filtro gaussiano obtuvo el mayor SSIM, mostrando una mayor similitud estructural con la imagen original.
-
-Los tres filtros presentaron valores elevados de ambas métricas, indicando que las imágenes procesadas mantienen una alta similitud con la ROI original.
-
-Sin embargo, estas métricas no permiten determinar por sí solas qué filtro elimina mejor el ruido o los reflejos luminosos, ya que únicamente evalúan la similitud respecto de la imagen de referencia.
-
-En esta comparación, **el filtro gaussiano presentó la mayor similitud estructural**, aunque no eliminó el reflejo luminoso presente sobre el borde de la pupila.
-
-#### Conclusiones generales del apartado 1.3
-
-A partir de las comparaciones realizadas, se observó que **Canny permite identificar de manera más clara y continua el contorno pupilar**, tanto en la ROI original como en la filtrada.
-
-El filtro gaussiano permite suavizar pequeñas variaciones de intensidad, pero no elimina los reflejos luminosos del flash, que continúan generando bordes adicionales.
-
-Por otra parte, el análisis de Fourier y de la PSD permitió comprobar que el filtrado modifica la distribución de las componentes frecuenciales y que la fase contiene información fundamental sobre la estructura espacial de la imagen.
-
-En conjunto, los resultados muestran que **no siempre es conveniente aplicar un filtrado previo**, ya que la reducción de ruido o detalles también puede afectar los bordes que se desean conservar.
-
-Finalmente, la evaluación mediante PSNR y SSIM mostró que los tres filtros espaciales conservan una alta similitud con la ROI original. El filtro de mediana obtuvo el mayor PSNR, mientras que el gaussiano presentó el mayor SSIM. Sin embargo, estas métricas deben complementarse con el análisis visual de los bordes.
+Respuestas a las preguntas de la guía: ningún filtro elimina el reflejo y Canny sobre la ROI original da el mejor contorno; la calidad frente a la imagen original se cuantifica con PSNR (diferencia de intensidad) y SSIM (similitud estructural).
 
 ---
 
-## Módulo 2. Segmentación y morfología matemática
+## Módulo 2. Segmentación y morfología
 
-### 2.1 Segmentación de la pupila — ROI original
+### 2.1 Segmentación de la pupila
 
-Se evaluaron Otsu, K-Means (K=2 a 5), Snakes y Watershed sobre la ROI en escala de grises. Se compararon sus máscaras con una referencia manual mediante el coeficiente Dice.
+Probamos Otsu, K-Means (K de 2 a 5), Snakes y Watershed sobre la ROI en grises y comparamos cada máscara con el contorno marcado a mano usando el coeficiente Dice.
 
 | Método | Dice |
 |---|---:|
-| Otsu | 0,8240 |
-| K-Means K=2 | 0,8429 |
-| K-Means K=3 | 0,9065 |
-| K-Means K=4 | 0,9065 |
-| K-Means K=5 | 0,9096 |
-| Snakes | 0,9292 |
-| Watershed | **0,9434** |
+| Otsu | 0,7849 |
+| K-Means K=2 | 0,7972 |
+| K-Means K=3 | 0,8893 |
+| K-Means K=4 | 0,9485 |
+| K-Means K=5 | 0,9498 |
+| Snakes | **0,9764** |
+| Watershed | 0,9659 |
 
-**Observaciones:**
+Snakes fue el mejor, seguido por Watershed. Otsu y K-Means con K = 2 incluyen píxeles que no son pupila y quedan cerca de 0,79; K-Means mejora al subir K y llega a 0,95.
 
-Otsu permitió detectar regiones oscuras, pero incluyó píxeles fuera de la pupila. K-Means mejoró al aumentar la cantidad de grupos.
+### 2.2 Morfología
 
-Snakes delimitó gran parte de la pupila y alcanzó un Dice de 0,9292, por lo que no corresponde afirmar que solo se contrajo hacia el reflejo.
-
-Watershed obtuvo el mayor Dice y se seleccionó para el siguiente apartado.
-
-Los reflejos luminosos y el tamaño reducido de la ROI siguen siendo limitaciones relevantes.
-
-### 2.2 Operaciones morfológicas y selección de máscara final
-
-Se aplicaron erosión, dilatación, apertura y cierre sobre la máscara obtenida con Watershed, y se compararon con la referencia manual.
+Sobre la máscara de Snakes aplicamos erosión, dilatación, apertura y cierre y comparamos con la referencia.
 
 | Operación | Dice | IoU |
 |---|---:|---:|
-| Sin morfología | 0,9434 | 0,8928 |
-| Erosión | 0,8874 | 0,7976 |
-| **Dilatación** | **0,9563** | **0,9163** |
-| Apertura | 0,9425 | 0,8913 |
-| Cierre | 0,9434 | 0,8928 |
+| Sin morfología | **0,9764** | **0,9539** |
+| Erosión | 0,9728 | 0,9471 |
+| Dilatación | 0,9632 | 0,9290 |
+| Apertura | 0,9764 | 0,9539 |
+| Cierre | 0,9763 | 0,9536 |
 
-La **dilatación** dio el mejor resultado, por lo que se seleccionó **Watershed + dilatación** como combinación final.
+Sin morfología y apertura empatan, y el cierre da prácticamente lo mismo. La erosión achica la máscara y la dilatación la agranda, y las dos empeoran el resultado. Nos quedamos con Snakes sin morfología, que es lo más simple. La esqueletización (2.2.2) da una versión adelgazada de la máscara que sirve para describir la forma, pero no se usó para calcular el área.
 
-La erosión redujo demasiado la región segmentada.
-
-La esqueletización permitió representar una versión adelgazada de la máscara, útil como descripción estructural, aunque no reemplaza el contorno ni se utilizó para calcular el área.
-
-**Conclusión del Módulo 2:**
-
-La combinación Watershed + dilatación obtuvo Dice = 0,9563 e IoU = 0,9163 respecto de la referencia manual de la ROI guardada.
-
-Esta selección es válida para esa imagen; no demuestra que el mismo método sea el óptimo para todos los frames o para videos nuevos.
+Esta elección se hizo con un solo frame de referencia, así que vale para esa imagen y no asegura que sea el mejor método para todos los frames ni para otros videos.
 
 ---
 
-## Módulo 3. Extracción de características y dinámica temporal
+## Módulo 3. Características y dinámica temporal
 
-### 3.1 Descriptores morfométricos y de textura
+### 3.1 Descriptores del frame segmentado
 
-#### 3.1.1 Morfometría
+**Morfometría** (máscara final, Snakes sin morfología):
 
-Sobre la máscara final de la ROI guardada, obtenida con Watershed + dilatación, se calcularon las siguientes características:
-
-| Descriptor | Resultado |
+| Descriptor | Valor |
 |---|---:|
-| Área | 702 px² |
-| Perímetro | 99,50 px |
-| Centroide | (42,27; 24,57) px |
-| Circularidad | 0,8911 |
-| Excentricidad | 0,3026 |
-| Diámetro equivalente | 29,90 px |
+| Área | 3847 px² |
+| Perímetro | 232,45 px |
+| Centroide | (116,75; 76,12) px |
+| Circularidad | 0,8947 |
+| Excentricidad | 0,3575 |
+| Diámetro equivalente | 69,99 px |
 
-La circularidad relativamente próxima a 1 y la excentricidad baja indican que la región segmentada es aproximadamente circular.
+La circularidad cercana a 1 y la excentricidad baja indican una región casi circular. El diámetro sale de `D = 2·√(A/π)` y está en píxeles, sin calibrar a milímetros.
 
-El diámetro equivalente se obtuvo a partir del área mediante `D = 2 √(A/π)`; no representa una medición calibrada en milímetros.
+**Textura de primer orden (pupila).**
 
-#### 3.1.2 Textura de primer orden
-
-Se calcularon media, desvío estándar, entropía y asimetría por canal RGB.
-
-En la pupila se obtuvieron los siguientes valores:
-
-| Canal | Media | Desvío estándar | Entropía | Asimetría |
+| Canal | Media | Desvío | Entropía | Asimetría |
 |---|---:|---:|---:|---:|
-| R | 46,4259 | 15,0527 | 4,8748 | 3,8201 |
-| G | 36,9330 | 14,0934 | 4,7258 | 4,9158 |
-| B | 39,1282 | 12,8720 | 4,8620 | 5,1439 |
+| R | 11,90 | 9,67 | 3,74 | 3,39 |
+| G | 9,04 | 8,05 | 3,53 | 3,49 |
+| B | 11,43 | 7,03 | 4,04 | 2,35 |
 
-Las asimetrías positivas elevadas son compatibles con la presencia de algunos píxeles más brillantes, posiblemente relacionados con reflejos.
+La asimetría positiva alta indica que hay algunos píxeles mucho más brillantes que el resto, probablemente el reflejo. Estos números describen las intensidades de la región, no la textura anatómica.
 
-Estos resultados describen la distribución de intensidades de la región estudiada, no necesariamente la textura anatómica pura.
+**GLCM de la pupila** (distancia de 1 px):
 
-#### 3.1.3 Textura de segundo orden (GLCM)
+| Ángulo | Contraste | Energía | Homogeneidad | Correlación | Entropía |
+|---|---:|---:|---:|---:|---:|
+| 0° | 0,2650 | 0,3074 | 0,9002 | 0,8796 | 2,3499 |
+| 45° | 0,4555 | 0,2814 | 0,8612 | 0,7703 | 2,4799 |
+| 90° | 0,2560 | 0,3054 | 0,8984 | 0,8821 | 2,3534 |
+| 135° | 0,3594 | 0,2792 | 0,8711 | 0,8310 | 2,4767 |
 
-En la pupila se calcularon contraste, energía, homogeneidad, correlación y entropía para distancias de 1 píxel y ángulos de 0°, 45°, 90° y 135°.
+Los valores cambian con la orientación: en 45° y 135° el contraste es mayor que en 0° y 90°, así que la relación entre píxeles vecinos no es igual en todas las direcciones.
 
-Las métricas variaron según la orientación, lo que muestra que las relaciones locales de intensidad no son idénticas en todas las direcciones.
+**Textura del iris por canal.** No segmentamos el iris: usamos como aproximación un anillo alrededor de la pupila, entre 1,15 y 1,65 radios.
 
-#### 3.1.4 Análisis de textura del iris
-
-Se compararon los canales RGB usando las métricas GLCM:
+| Canal | Media | Desvío | Entropía | Asimetría |
+|---|---:|---:|---:|---:|
+| R | 102,67 | 12,38 | 5,37 | 0,68 |
+| G | 87,36 | 11,32 | 5,22 | 0,84 |
+| B | 61,23 | 10,37 | 5,08 | 1,05 |
 
 | Canal | Contraste | Energía | Homogeneidad | Correlación | Entropía |
 |---|---:|---:|---:|---:|---:|
-| R | 0,4099 | 0,1234 | 0,8224 | 0,8646 | 3,5804 |
-| G | 0,3799 | 0,1411 | 0,8412 | 0,8596 | 3,3992 |
-| B | 0,4108 | 0,1374 | 0,8265 | 0,8577 | 3,4993 |
+| R | 0,4396 | 0,1047 | 0,8184 | 0,9075 | 3,9453 |
+| G | 0,4175 | 0,1248 | 0,8245 | 0,8921 | 3,7447 |
+| B | 0,4439 | 0,1314 | 0,8189 | 0,8746 | 3,6943 |
 
-El canal **R** presentó la mayor entropía y una energía menor, lo que sugiere una distribución más variada de las combinaciones de intensidades.
-
-El canal **B** presentó un contraste apenas mayor.
-
-Por lo tanto, **R parece aportar mayor riqueza textural según la entropía**, aunque esa conclusión depende de las métricas, la cuantización y la región de iris elegida.
-
-No se puede identificar un canal universalmente mejor a partir de un único frame.
+El canal R tiene el mayor desvío y la mayor entropía (en primer y segundo orden), la menor energía y la menor homogeneidad, así que es el que aporta más variedad de textura. B tiene el contraste más alto, pero por muy poco (0,4439 contra 0,4396). La conclusión depende del anillo elegido y de un único frame.
 
 ### 3.2 Seguimiento temporal y respuesta fisiológica
 
-#### 3.2.1 Procesamiento del video
+#### Procesamiento del video
 
-Se analizaron 728 frames de `video5.mp4`, a 59,97 FPS, con una duración aproximada de 12,14 segundos.
+Primero se estima automáticamente una "semilla": la posición y el radio típicos de la pupila, a partir de 15 frames repartidos en el video. Dio centro en (412,6; 345,7) px y radio de 39,2 px, con los 15 frames consistentes. Después, frame a frame, se busca la pupila cerca de la última posición y se segmenta con el método del Módulo 2 (Snakes, sin morfología), controlando que el área, la forma y los saltos entre frames sean razonables. Este seguimiento no usa la ROI marcada a mano.
 
-Se utilizó Watershed + dilatación para seguir la pupila, con un **96,70% de detecciones válidas** según los criterios automáticos.
+Se procesaron 728 frames. El 94,09 % tuvo detección válida y 43 quedaron sin detección. La mayoría de los intentos descartados fueron por área fuera de rango (43) o por saltos de área entre frames (17).
 
-- Frames sin detección: 24.
-- Valores atípicos descartados mediante Hampel: 9.
-- Frames totales procesados: 728.
+*Validación manual.* Marcamos el contorno a mano en algunos frames del registro y comparamos área y diámetro con las mediciones automáticas.
 
-**Validación manual mediante MAE y RMSE:**
+| Error | Área | Diámetro |
+|---|---:|---:|
+| MAE | — | — |
+| RMSE | — | — |
 
-Se compararon las mediciones automáticas con contornos dibujados manualmente en 6 frames distribuidos a lo largo del registro.
 
-| Error | Resultado |
+#### Curva temporal
+
+El área baja después de que se enciende la luz y se recupera en parte cuando se apaga. En la curva también aparecen huecos y picos por parpadeos, por el párpado que tapa la pupila y por los cambios de iluminación; esos tramos no son cambios fisiológicos.
+
+#### Parámetros fisiológicos
+
+El registro es de tipo A: la luz se enciende a los 1,98 s y se apaga a los 9,1 s. La constricción se mide desde el encendido y la redilatación desde el apagado.
+
+| Parámetro | Valor |
 |---|---:|
-| MAE del área | 341,17 px² |
-| RMSE del área | 375,72 px² |
-| MAE del diámetro | 3,21 px |
-| RMSE del diámetro | 3,54 px |
+| Encendido de la luz | 1,984 s |
+| Apagado de la luz | 9,105 s |
+| Área basal | 8545 px² |
+| Área mínima | 4006 px² (a los 5,50 s) |
+| Amplitud | 4539 px² (53,1 % del basal) |
+| Inicio de la constricción | 2,135 s |
+| Latencia | 0,150 s |
+| Velocidad de constricción | 1347,48 px²/s |
+| Velocidad de redilatación | 875,01 px²/s |
 
-Los errores muestran diferencias apreciables entre ambas mediciones.
+Cómo se calcula cada uno:
+- **Área basal:** mediana del área en los 0,5 s anteriores al encendido.
+- **Amplitud:** área basal menos área mínima.
+- **Latencia:** tiempo entre el encendido y el inicio de la constricción, que se marca cuando el área queda 0,1 s seguidos por debajo del basal menos el 5 % de la amplitud.
+- **Velocidad de constricción:** amplitud dividida por el tiempo entre el inicio y el mínimo.
+- **Velocidad de redilatación:** cambio de área entre el apagado y el final de la ventana, dividido por ese tiempo. La ventana es de hasta 4 s; acá son unos 3 s porque el video termina a los 12,14 s.
 
-En varios de los frames seleccionados, el algoritmo estimó un diámetro superior al manual, aunque la evaluación debe considerar también la variabilidad del trazado manual y el tamaño reducido de la muestra.
+Los valores tienen sentido: la redilatación es más lenta que la constricción, como se espera, y la latencia de 0,15 s es razonable aunque algo menor que lo habitual (0,2 a 0,4 s), seguramente porque el inicio se marca con una caída de solo el 5 % de la amplitud.
 
-Los seis frames permiten una primera validación, pero no aseguran precisión uniforme en el video completo.
+#### Cambios respecto de la primera versión
 
-#### 3.2.2 Curva temporal
+La primera versión del código dio resultados que no podían ser correctos, y los corregimos:
 
-Se generó la evolución del área pupilar en función del tiempo.
+| Parámetro | Primera versión | Versión final |
+|---|---:|---:|
+| Encendido | 1,934 s | 1,984 s |
+| Inicio de la constricción | 1,951 s | 2,135 s |
+| Área basal | 8454 px² | 8545 px² |
+| Área mínima | 3532 px² (a los 4,19 s) | 4006 px² (a los 5,50 s) |
+| Amplitud | 4922 px² | 4539 px² |
+| Latencia | 0,017 s | 0,150 s |
+| Vel. de constricción | 2202,67 px²/s | 1347,48 px²/s |
+| Vel. de redilatación | 378,57 px²/s | 875,01 px²/s |
 
-La curva muestra una disminución posterior al aumento de iluminación, seguida de una recuperación parcial.
+- **Latencia de 0,017 s.** Equivale a un solo frame (1/59,97 s), o sea que el inicio se marcaba justo después del estímulo. Ahora el inicio exige que la caída se sostenga 0,1 s y se mide contra un área basal calculada solo con los 0,5 s previos, y si la amplitud es comparable al ruido no se informa latencia.
+- **Área mínima.** Antes se tomaba el valor más bajo de toda la serie, que podía ser un solo frame mal segmentado. Ahora se busca el mínimo sobre una mediana móvil de 0,25 s, y el mínimo pasó de 3532 a 4006 px²: el valor anterior era un hundimiento aislado y por eso la amplitud y la velocidad de constricción estaban infladas.
+- **Instante del encendido.** Antes se tomaba el punto de mayor cambio de luminosidad, que cae a mitad de la subida. Ahora es el primer cruce del 20 % del escalón de luz, que se parece más al momento real del estímulo. El mismo método detecta el apagado, y según cuál de los dos aparece primero clasifica el registro como A (luz que se enciende) o B (luz que se apaga).
+- **Redilatación.** Antes se medía desde el mínimo hasta la última muestra, mezclando el tiempo con la luz encendida. Ahora se mide desde el apagado.
 
-Sin embargo, se identificaron picos abruptos y huecos asociados con parpadeos, oclusión parcial y cambios de iluminación.
-
-Por lo tanto, no todos los valores automáticos representan cambios fisiológicos reales.
-
-#### 3.2.3 Parámetros fisiológicos
-
-El algoritmo informó los siguientes resultados para `video5.mp4`:
-
-| Parámetro | Estimación automática |
-|---|---:|
-| Encendido del estímulo | 1,934 s |
-| Apagado del estímulo | 9,105 s |
-| Área basal | 5862 px² |
-| Área mínima | 2577 px² |
-| Amplitud | 3285 px² |
-| Latencia | 0,083 s |
-| Velocidad de constricción | 887,35 px²/s |
-| Velocidad de redilatación | 298,12 px²/s |
-
-Estas cifras son **estimaciones automáticas preliminares**.
-
-La latencia muy corta y los errores de área durante parpadeos requieren revisión antes de considerarlas medidas fisiológicas confiables.
 
 #### Variabilidad entre registros
 
-Se procesaron automáticamente cinco videos de la misma persona mediante un script independiente.
+Los parámetros se calcularon para los cinco videos de la misma persona.
 
-Se obtuvieron parámetros para cuatro de ellos; en `video3.mov` no se identificó el estímulo.
+> **Pendiente:** completar con la tabla que da `comparar_registros.py` (o con `resultados/variabilidad_entre_registros.csv`) usando la versión final del código. Las tablas anteriores no sirven porque tenían latencias de 0 s y de más de 2 s, que eran errores del método viejo.
 
-| Registro | Latencia (s) | Amplitud (px²) | Amplitud relativa (%) |
-|---|---:|---:|---:|
-| video1.mov | 2,123 | 42,50 | 5,73 |
-| video2.mov | 0,000 | 422,67 | 52,18 |
-| video3.mov | No detectado | — | — |
-| video4.mov | 0,501 | 198,00 | 16,23 |
-| video5.mp4 | 0,083 | 3285,00 | 56,04 |
+Para comparar entre videos conviene usar la amplitud relativa (% del basal) y no los px², porque el ojo puede ocupar un tamaño distinto en el encuadre de cada video.
 
-Entre los cuatro registros con parámetros calculados:
+#### Artefactos
 
-| Parámetro | Media | Desvío estándar |
-|---|---:|---:|
-| Latencia (s) | 0,677 | 0,989 |
-| Amplitud relativa (%) | 32,545 | 25,316 |
+Las fuentes principales de artefactos son los parpadeos (en este video, cerca de 1,8 s y entre 9,2 y 9,6 s), el movimiento del párpado que tapa parte de la pupila, los cambios bruscos de iluminación y las detecciones incorrectas que producen picos de área.
 
-La variabilidad observada puede reflejar tanto diferencias entre registros como errores del algoritmo.
+Para tratarlos, el código:
+1. descarta los frames donde la detección falla o el área o la posición saltan demasiado respecto del frame anterior;
+2. elimina valores atípicos con el filtro de Hampel y con una mediana local de 0,3 s;
+3. descarta las mediciones pegadas a cada parpadeo (0,05 s a cada lado) y los tramos válidos de menos de 0,1 s;
+4. interpola solo huecos de hasta 3 frames y aplica una mediana de 5 frames;
+5. deja el resto como `NaN` y marca en una columna cada parpadeo, pérdida de seguimiento y salto del ojo.
 
-En particular, las latencias de 0 y 2,123 s, así como las grandes diferencias de amplitud, hacen que **estos promedios no deban interpretarse como variabilidad fisiológica validada**.
+> **Pendiente:** completar cuántos parpadeos y mediciones descartadas informó la terminal en la corrida final.
 
-La amplitud en píxeles² tampoco es directamente comparable si el tamaño aparente del ojo difiere entre videos, por lo que se reportó adicionalmente la amplitud relativa.
+Aun así pueden quedar picos sueltos, así que el control de artefactos es parcial.
 
-#### 3.2.4 Artefactos y tratamiento
-
-Los principales artefactos observados fueron:
-
-- Parpadeos y oclusiones pupilares.
-- Movimientos del párpado que dificultan la segmentación.
-- Cambios bruscos de iluminación.
-- Picos de área asociados a detecciones incorrectas.
-
-Se identificaron errores especialmente alrededor de 1,8 s, 4,1–4,2 s, 7,0–7,2 s y 9,1–9,5 s.
-
-Para tratarlos, el procesamiento implementó:
-
-- Restricciones sobre saltos de área y posición.
-- Descarte de valores atípicos mediante el filtro Hampel.
-- Valores faltantes representados como `NaN`.
-- Interpolación de huecos de hasta tres frames.
-- Suavizado mediante mediana temporal de cinco frames.
-
-Pese a estas medidas, se conservaron algunos picos espurios, por lo que el control de artefactos es parcial.
-
-#### Conclusión del Módulo 3
-
-Se implementó la extracción de características del frame y el seguimiento pupilar temporal, incluyendo curvas, estimaciones fisiológicas, validación manual mediante MAE/RMSE y análisis exploratorio de variabilidad entre registros.
-
-La principal limitación es la robustez del seguimiento ante parpadeos y cambios de iluminación.
-
-Además, debe verificarse que las imágenes guardadas utilizadas en los análisis estáticos correspondan al mismo registro que el video analizado temporalmente.
+**Conclusión del Módulo 3.** Logramos seguir la pupila en todo el video, obtener la curva de área y calcular los parámetros del reflejo fotomotor. La parte más delicada es la robustez frente a parpadeos y cambios de luz.
 
 ---
 
-## Módulo 4. Compresión de imágenes
+## Módulo 4. Compresión
 
-### 4.1 Compresión sin pérdida: Huffman y RLE
+### 4.1 Sin pérdida: Huffman y RLE
 
-Se analizaron la ROI en escala de grises, la máscara pupilar binaria y el frame completo mediante Huffman y RLE horizontal/vertical.
-
-Se obtuvieron los siguientes **ratios teóricos**, definidos como tamaño original en memoria dividido por tamaño codificado estimado:
+Aplicamos Huffman y RLE (horizontal y vertical) a la ROI en grises, la máscara binaria y el frame completo. El ratio es el tamaño original dividido por el tamaño codificado estimado.
 
 | Imagen | Huffman | RLE horizontal | RLE vertical |
 |---|---:|---:|---:|
-| ROI (56 × 85 px) | 1,344 | 0,400 | 0,402 |
-| Máscara pupilar (56 × 85 px) | 8,000 | 26,011 | 24,410 |
-| Frame completo (480 × 768 px) | 1,105 | 0,579 | 0,566 |
+| ROI (161 × 241) | 1,196 | 0,398 | 0,398 |
+| Máscara pupilar (161 × 241) | 8,000 | 91,728 | 86,803 |
+| Frame completo (598 × 968) | 1,086 | 0,464 | 0,456 |
 
-**Observaciones:**
+En la máscara binaria, con grandes zonas constantes, los dos métodos comprimen mucho y RLE muchísimo más que Huffman (casi 92 contra 8). En la ROI y el frame, donde las intensidades cambian todo el tiempo, RLE da un ratio menor a 1: lo codificado ocupa más que el original.
 
-Huffman presentó una compresión moderada en la ROI y el frame completo, pero una reducción importante en la máscara binaria.
+Son ratios teóricos: Huffman cuenta solo la longitud de los códigos y RLE usa 8 bits por intensidad y 16 por cantidad de repeticiones, sin encabezados ni tablas. Al no tener pérdida, el PSNR sería infinito y el SSIM igual a 1, pero no verificamos la reconstrucción decodificando.
 
-RLE resultó especialmente eficiente para la máscara debido a sus grandes regiones de intensidad constante.
+### 4.2 JPEG
 
-En la ROI y el frame completo, donde las intensidades cambian continuamente, RLE produjo ratios inferiores a 1, es decir, el tamaño codificado estimado fue mayor que el original.
+Probamos Q = 90, 50, 10 y 5. Al bajar Q aumenta el ratio y bajan el PSNR y el SSIM.
 
-Estos ratios **no representan archivos comprimidos completos**: Huffman contempla únicamente longitudes de códigos, y RLE considera 8 bits por intensidad más 16 bits por cantidad de repeticiones.
+**ROI**
 
-No se incorporaron encabezados ni tablas de decodificación.
-
-Como Huffman y RLE son métodos sin pérdida, una reconstrucción exacta tendría SSIM = 1 y PSNR infinito, pero la implementación actual no verifica la reconstrucción mediante decodificación.
-
-### 4.2 JPEG con pérdida y comparación cuantitativa
-
-Se aplicó JPEG con calidades Q = 90, 50, 10 y 5.
-
-A medida que disminuyó Q, aumentó el ratio de compresión y disminuyeron PSNR y SSIM.
-
-#### Resultados de la ROI
-
-| Calidad | Ratio | PSNR (dB) | SSIM |
+| Q | Ratio | PSNR (dB) | SSIM |
 |---|---:|---:|---:|
-| Q=90 | 3,987 | 46,23 | 0,9894 |
-| Q=50 | 7,031 | 39,57 | 0,9570 |
-| Q=10 | 10,721 | 32,38 | 0,8093 |
-| Q=5 | 11,667 | 28,85 | 0,6732 |
+| 90 | 4,813 | 46,22 | 0,9919 |
+| 50 | 10,660 | 39,66 | 0,9669 |
+| 10 | 25,867 | 31,52 | 0,8283 |
+| 5 | 36,229 | 28,12 | 0,6986 |
 
-#### Resultados de la máscara pupilar
+**Máscara pupilar**
 
-| Calidad | Ratio | PSNR (dB) | SSIM |
+| Q | Ratio | PSNR (dB) | SSIM |
 |---|---:|---:|---:|
-| Q=90 | 4,718 | 46,82 | 0,9852 |
-| Q=50 | 6,889 | 33,01 | 0,9117 |
-| Q=10 | 9,616 | 25,94 | 0,8619 |
-| Q=5 | 10,554 | 23,44 | 0,2794 |
+| 90 | 18,380 | 53,33 | 0,9978 |
+| 50 | 26,395 | 38,95 | 0,9817 |
+| 10 | 36,536 | 32,00 | 0,9740 |
+| 5 | 39,392 | 27,40 | 0,1930 |
 
-La degradación afecta especialmente la preservación de una máscara binaria con bordes abruptos.
+**Frame completo**
 
-#### Resultados del frame completo
-
-| Calidad | Ratio | PSNR (dB) | SSIM |
+| Q | Ratio | PSNR (dB) | SSIM |
 |---|---:|---:|---:|
-| Q=90 | 6,801 | 45,99 | 0,9921 |
-| Q=50 | 16,278 | 39,50 | 0,9708 |
-| Q=10 | 40,783 | 32,02 | 0,8610 |
-| Q=5 | 57,717 | 28,43 | 0,7689 |
+| 90 | 5,803 | 46,21 | 0,9923 |
+| 50 | 13,767 | 39,15 | 0,9695 |
+| 10 | 35,576 | 31,22 | 0,8569 |
+| 5 | 51,670 | 27,63 | 0,7643 |
 
-Los resultados muestran que JPEG permite alcanzar ratios de compresión elevados, especialmente sobre el frame completo, aunque la calidad disminuye progresivamente.
+JPEG llega a ratios altos, sobre todo en el frame completo (51,7 con Q = 5), a cambio de perder calidad. En la máscara binaria el PSNR baja de a poco, pero el SSIM se mantiene alto hasta Q = 10 (0,97) y cae de golpe con Q = 5 (0,19): con una compresión tan fuerte se destruyen los bordes abruptos de la máscara.
 
-### 4.3 Efectos visuales y medición pupilar
+### 4.3 Efectos visuales y medición
 
-#### Artefactos de bloque
+Con Q = 90 la imagen es casi igual a la original y con Q = 50 el contorno de la pupila se conserva bien. Los bloques y la pérdida de textura se hacen evidentes desde Q = 10, y más con Q = 5. La pérdida afecta sobre todo a los bordes, justo lo que se usa para medir la pupila; en las zonas uniformes se ven bloques y bandas, pero la degradación es menos notoria.
 
-En las comparaciones visuales, Q=90 mantuvo una apariencia muy similar a la original y Q=50 conservó razonablemente el contorno pupilar.
+Para ver el efecto sobre el diámetro volvimos a segmentar la ROI original y las versiones JPEG con Watershed + dilatación:
 
-Los artefactos de bloque y la pérdida de textura se hicieron evidentes alrededor de **Q=10**, y fueron más pronunciados con Q=5.
-
-#### Bordes frente a regiones uniformes
-
-La pérdida de detalles afecta especialmente las transiciones de intensidad y los bordes de la pupila, importantes para estimar su tamaño.
-
-En las regiones uniformes, la degradación puede ser menos perceptible, aunque aparecen bloques y bandas de intensidad.
-
-En la máscara pupilar, las irregularidades de los bordes se observan claramente a bajas calidades.
-
-#### Impacto sobre el diámetro pupilar
-
-Se volvió a segmentar la ROI original y sus versiones reconstruidas con JPEG Q=50 y Q=10, empleando Watershed + dilatación.
-
-Se calculó el diámetro equivalente en cada caso:
-
-| Imagen | Diámetro (px) | Diferencia respecto del original |
+| Imagen | Diámetro (px) | Diferencia |
 |---|---:|---:|
-| ROI original | 29,90 | — |
-| JPEG Q=50 | 30,11 | +0,21 px |
-| JPEG Q=10 | 31,23 | +1,33 px |
+| ROI original | 72,80 | — |
+| JPEG Q=50 | 72,87 | +0,08 |
+| JPEG Q=10 | 74,28 | +1,49 |
 
-En esta ROI, JPEG Q=50 modificó poco la estimación del diámetro, mientras que Q=10 produjo una sobreestimación mayor.
+Con Q = 50 el diámetro casi no cambia; con Q = 10 se sobreestima en 1,49 px, cerca de un 2 %. Este resultado vale para esta imagen y este método. El diámetro original de la tabla (72,80 px) no coincide con el de 3.1 (69,99 px) porque acá se segmentó con Watershed + dilatación y en el Módulo 3 con Snakes sin morfología.
 
-Este resultado es específico de la imagen y el método empleados y no demuestra que el mismo efecto se repita en todos los frames o videos.
-
-#### Conclusión del Módulo 4
-
-Los métodos sin pérdida son especialmente adecuados cuando se necesita preservar exactamente la información, y RLE mostró ventajas notorias en la máscara binaria.
-
-JPEG logró ratios altos sobre imágenes naturales, a costa de una degradación progresiva.
-
-Para conservar la precisión de mediciones pupilares, los resultados favorecen calidades moderadas frente a una compresión muy agresiva.
+**Conclusión del Módulo 4.** Los métodos sin pérdida sirven cuando hay que conservar la información exacta, y RLE rinde muchísimo en la máscara binaria. JPEG comprime más pero degrada. Para medir la pupila conviene una calidad moderada (Q = 50 o más).
 
 ---
 
-## Consideraciones para la entrega y reproducibilidad
+## Limitaciones
 
-El programa principal ejecuta secuencialmente los Módulos 1 a 4.
-
-Sin embargo, en el estado probado, `main.py` **reutiliza `imagenes/roi.png` y `imagenes/mascara_referencia.png` cuando existen**, aunque se cambie `VIDEO_PATH`.
-
-Por lo tanto, al analizar un video nuevo no necesariamente se regeneran la ROI ni la referencia manual de ese registro.
-
-Esto debe resolverse o documentarse como limitación antes de afirmar que el pipeline es completamente automático y reproducible sobre videos no vistos.
-
-Asimismo, el registro analizado temporalmente (`video5.mp4`) dura 12,14 segundos, mientras que el protocolo de adquisición propone registros de aproximadamente 30 segundos.
-
-Los resultados presentados corresponden a los archivos disponibles y no constituyen una validación exhaustiva del protocolo de adquisición.
-
+- El video analizado dura 12,14 s y el protocolo propone unos 30 s.
+- El método de segmentación se eligió con un solo frame marcado a mano en `video5`; el seguimiento temporal es automático, pero ese método no se validó con otros videos.
+- Los parpadeos y los cambios de luz siguen generando picos; el control es parcial.
+- La latencia depende del criterio de inicio (caída del 5 % de la amplitud sostenida 0,1 s), por eso puede quedar algo por debajo de lo habitual.
+- Áreas y diámetros están en píxeles, sin calibrar a milímetros.
