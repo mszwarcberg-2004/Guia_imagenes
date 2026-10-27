@@ -17,7 +17,7 @@ SALIDA, en resultados_externos/<nombre_del_video>/ :
   curva_pupilar.png   la misma curva, como grafico
   extras/             material de apoyo (video de revision, log, tablas internas)
 
-El seguimiento usa el metodo mas robusto de nuestras pruebas (Snakes, sin morfologia).
+El seguimiento usa el metodo mas robusto de nuestras pruebas (Snakes, erosión).
 Si se vuelve a procesar un video, su carpeta de resultados se reemplaza por completo.
 """
 
@@ -51,12 +51,12 @@ RAIZ = Path(__file__).resolve().parent.parent
 #       VIDEO_PATH = "/Users/nombre/Descargas/video_catedra.mov"
 #       VIDEO_PATH = "datos/Videos_ojo/otro_video.mov"
 # ==============================================================================
-VIDEO_PATH = "datos/Videos_ojo/video_prueba.mp4"
+VIDEO_PATH = "datos/Videos_ojo/video5.mp4"
 # ==============================================================================
 
 # Metodo mas robusto de nuestras pruebas (Modulo 2: mayor Dice contra la referencia manual)
 METODO = "Snakes"
-MORFOLOGIA = "Sin morfologia"
+MORFOLOGIA = "Erosion"
 
 SALIDAS = RAIZ / "resultados_externos"
 
@@ -137,12 +137,13 @@ def guardar_curva(serie, destino):
     plt.close(fig)
 
 
-def guardar_video_revision(video_path, mediciones, destino):
+def guardar_video_revision(video_path, mediciones, contornos, destino):
 
     """
-    Dibuja el centro y el circulo equivalente.
+    Dibuja el contorno real de la pupila segmentada (envolvente convexa que
+    devuelve segmentar_pupila) y su centro.
 
-    IMPORTANTE: No es el contorno segmentado exacto.
+    contornos: dict {frame: contorno} generado por procesar_registros.
     """
 
     cap = cv2.VideoCapture(str(video_path))
@@ -173,17 +174,43 @@ def guardar_video_revision(video_path, mediciones, destino):
             "FPS o dimensiones invalidas"
         )
 
-    writer = cv2.VideoWriter(
-        str(destino),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (ancho, alto)
-    )
+    destino = Path(destino).expanduser().resolve()
+    destino.parent.mkdir(parents=True, exist_ok=True)
 
-    if not writer.isOpened():
+    print("OpenCV:", cv2.__version__)
+    print("Destino:", destino)
+    print("FPS:", fps)
+    print("Dimensiones:", ancho, alto)
+
+    writer = None
+
+    for codec in ("mp4v", "avc1", "MJPG"):
+        prueba = destino.with_name(
+            f"{destino.stem}_prueba.{ 'avi' if codec == 'MJPG' else 'mp4' }"
+        )
+
+        fourcc = cv2.VideoWriter_fourcc(*codec)
+
+        candidato = cv2.VideoWriter(
+            str(prueba),
+            fourcc,
+            fps,
+            (ancho, alto)
+        )
+
+        print(f"Codec {codec}: abierto = {candidato.isOpened()}")
+
+        if candidato.isOpened():
+            writer = candidato
+            destino = prueba
+            break
+
+        candidato.release()
+
+    if writer is None:
         cap.release()
         raise RuntimeError(
-            "No fue posible crear el video MP4"
+            "No se pudo inicializar VideoWriter con ninguno de los codecs probados"
         )
 
     datos = mediciones.set_index(
@@ -228,22 +255,16 @@ def guardar_video_revision(video_path, mediciones, destino):
                         int(round(m["centro_y"]))
                     )
 
-                    radio = max(
-                        1,
-                        int(
-                            round(
-                                float(m["diametro_px"]) / 2
-                            )
-                        )
-                    )
+                    contorno = contornos.get(idx)
 
-                    cv2.circle(
-                        frame,
-                        centro,
-                        radio,
-                        (0, 255, 0),
-                        2
-                    )
+                    if contorno is not None:
+                        cv2.polylines(
+                            frame,
+                            [contorno],
+                            True,
+                            (0, 255, 0),
+                            2
+                        )
 
                     cv2.circle(
                         frame,
@@ -509,6 +530,9 @@ def ejecutar(video_path):
 
     log = io.StringIO()
 
+    # Contornos reales por frame, para el video de revision
+    contornos = {}
+
     try:
 
         with contextlib.redirect_stdout(log):
@@ -523,7 +547,8 @@ def ejecutar(video_path):
                     MORFOLOGIA,
                     modo="evaluacion",
                     procesar_otros=False,
-                    mostrar_figuras=False
+                    mostrar_figuras=False,
+                    contornos_salida=contornos
                 )
 
     finally:
@@ -593,19 +618,20 @@ def ejecutar(video_path):
     # 3. VIDEO DE REVISION (si falla, solo se avisa)
     # ========================================================
 
+
     print("\nGenerando video de revision...")
 
     try:
-
         guardar_video_revision(
             video,
             mediciones,
+            contornos,
             extras / "revision_pupila.mp4"
         )
 
     except Exception as exc:
-
         print(f"No se pudo generar el video de revision: {exc}")
+        traceback.print_exc()
 
     # ========================================================
     # 4. RESUMEN EN PANTALLA

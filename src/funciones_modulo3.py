@@ -94,8 +94,8 @@ RELACION_RADIO_SEMILLA = (0.5, 1.9)
 FACTOR_DISCO_LOCAL = 1.8
 
 # Controles de calidad
-CIRCULARIDAD_MIN = 0.55
-RELACION_AREA_MAX = 1.60          # cambio maximo de area entre frames
+CIRCULARIDAD_MIN = 0.45
+RELACION_AREA_MAX = 2          # cambio maximo de area entre frames
 DESPLAZAMIENTO_MAX_REL = 1.0      # desplazamiento maximo (en radios)
 
 # Parametros de 3.2 (fisiologicos, limpieza de la serie y artefactos)
@@ -439,9 +439,8 @@ def quitar_reflejos(roi_local, zona_disco, radio):
         cv2.connectedComponentsWithStats(brillantes, 8)
     )
 
-    # Solo manchas chicas: una region grande no es un reflejo
-    # (es esclerotica, parpado, etc.)
-    area_maxima = 0.08 * np.pi * radio**2
+    
+    area_maxima = 0.32 * np.pi * radio**2
 
     reflejos = np.zeros(roi_local.shape, dtype=np.uint8)
 
@@ -576,7 +575,7 @@ def segmentar_snake_local(roi_local, cx, cy, radio, zona_disco):
 
     img = gaussian(
         roi_normalizada,
-        sigma=1
+        sigma=2
     )
 
     radio_ini = 1.5 * radio
@@ -600,12 +599,12 @@ def segmentar_snake_local(roi_local, cx, cy, radio, zona_disco):
     final = active_contour(
         img,
         inicial,
-        alpha=0.015,
+        alpha=0.025,
         beta=10,
-        gamma=0.001,
+        gamma=0.01,
         w_line=0,
-        w_edge=1,
-        max_num_iter=500,   # menos iteraciones que en 2.1.3 (el video tiene muchos frames)
+        w_edge=5,
+        max_num_iter=1000,   # menos iteraciones que en 2.1.3 (el video tiene muchos frames)
         boundary_condition="periodic"
     )
 
@@ -853,7 +852,9 @@ def segmentar_pupila(gris, candidato):
         "cy": float(centro_final_y),
         "radio": float(diametro / 2),
         "circularidad": float(circularidad),
-        "puntaje": float(candidato["puntaje"])
+        "puntaje": float(candidato["puntaje"]),
+        # Contorno real (envolvente convexa) en coordenadas del frame completo
+        "contorno": contorno + np.array([[[x1, y1]]], dtype=np.int32)
     }
 
 
@@ -1006,12 +1007,16 @@ def _mediana_ventana(t, x, t0, t1):
     return float(np.median(x[m])) if m.sum() >= 3 else np.nan
 
 
-def procesar_video(ruta, semilla=None, guardar_revision=False):
+def procesar_video(ruta, semilla=None, guardar_revision=False,
+                   contornos_salida=None):
     """
     Segmenta la pupila frame a frame y mide la luminosidad en UNA sola
     lectura del video. Devuelve (DataFrame, fps_efectivo, revision, semilla).
     El eje de tiempo usa los timestamps reales del video (POS_MSEC) y,
     si no son confiables, cae a indice/fps.
+
+    Si contornos_salida es un dict, se llena con {frame: contorno} para cada
+    frame con pupila detectada (contorno real, coordenadas del frame completo).
     """
     global ZONA_SEGUIMIENTO, RANGO_RADIOS_SEMILLA
 
@@ -1076,6 +1081,10 @@ def procesar_video(ruta, semilla=None, guardar_revision=False):
             if resultado is not None:
                 anterior = resultado
                 fallos = 0
+
+                if contornos_salida is not None:
+                    contornos_salida[idx] = resultado["contorno"]
+
                 fila = {
                     "area_px2": resultado["area"],
                     "diametro_px": resultado["diametro"],
@@ -2854,7 +2863,8 @@ def analizar_frame_segmentado(roi, roi_gris, mascara_final, mejor_metodo, mejor_
 # ------------------------------------------------------------
 
 def procesar_registros(video_path, carpeta_resultados, metodo, operacion,
-                       modo="desarrollo", procesar_otros=None, mostrar_figuras=None):
+                       modo="desarrollo", procesar_otros=None, mostrar_figuras=None,
+                       contornos_salida=None):
     """
     Procesa video_path: curva de area/diametro frame a frame, parametros
     fisiologicos, tablas y graficos. En modo "desarrollo" tambien procesa
@@ -2937,7 +2947,8 @@ def procesar_registros(video_path, carpeta_resultados, metodo, operacion,
                 df_crudo, fps_reg, revision, _ = procesar_video(
                     ruta,
                     semilla=semilla_principal if es_principal else None,
-                    guardar_revision=(es_principal and modo == "desarrollo")
+                    guardar_revision=(es_principal and modo == "desarrollo"),
+                    contornos_salida=contornos_salida if es_principal else None
                 )
 
                 df_crudo.to_csv(ruta_mediciones, index=False)

@@ -79,11 +79,11 @@ def segmentar_snake(roi_gris):
     contorno_final = active_contour(
         imagen_snake_suavizada,
         contorno_inicial,
-        alpha=0.015,
+        alpha=0.025,
         beta=10,
-        gamma=0.001,
+        gamma=0.01,
         w_line=0,
-        w_edge=1,
+        w_edge=5,
         max_num_iter=2500,
         boundary_condition="periodic"
     )
